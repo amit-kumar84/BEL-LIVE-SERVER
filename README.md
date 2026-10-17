@@ -51,3 +51,248 @@ npm run dev
 ```
 
 Run backend checks with `.venv\Scripts\python -m pytest backend\tests -q`; run the frontend production check with `npm run build`. The test suite covers monitor input validation, failure/recovery thresholds, bandwidth rollover/reset, audio path confinement, event identity deduplication, and local API authorization/validation behavior.
+
+## Hindi setup guide (Windows)
+
+### 1. क्या-क्या install करना है
+
+इस application को चलाने के लिए Windows 10/11 PC पर ये software install करें:
+
+1. **Python 3.11 या उससे नया** — <https://www.python.org/downloads/windows/>
+   Installation के समय **Add Python to PATH** चुनें। `py --version` से जाँच करें।
+2. **Node.js 20 या उससे नया (LTS)** — <https://nodejs.org/>
+   इसके साथ npm भी install होता है। `node --version` और `npm --version` से जाँच करें।
+3. **Modern browser** — Edge, Chrome या कोई अन्य आधुनिक browser। Kiosk mode के लिए Microsoft Edge उपयोग होता है।
+
+अलग से MySQL, MongoDB या कोई दूसरा database install करने की आवश्यकता नहीं है। History local SQLite file में save होती है। Monitoring के लिए PC को संबंधित network और ICMP/TCP/HTTP targets तक पहुँच की अनुमति होनी चाहिए।
+
+### 2. Project खोलना
+
+Project folder को PC पर copy/clone करें, फिर PowerShell में उसी folder में जाएँ:
+
+```powershell
+cd "C:\Users\YourName\Downloads\BEL-LIVE-SERVER"
+```
+
+Folder में `start_dashboard.bat`, `backend`, `src`, `package.json` और `backend\requirements.txt` मौजूद होने चाहिए।
+
+### 3. सबसे आसान start तरीका
+
+Project folder में [start_dashboard.bat](./start_dashboard.bat) पर double-click करें, या PowerShell में चलाएँ:
+
+```powershell
+.\start_dashboard.bat
+```
+
+पहली बार start होने पर script अपने-आप:
+
+- `.venv` नाम का Python virtual environment बनाएगी।
+- `backend\requirements.txt` की Python dependencies install करेगी।
+- `package.json` की npm dependencies install करेगी।
+- API को `http://127.0.0.1:8000` पर start करेगी।
+- Dashboard को `http://127.0.0.1:5173` पर start करेगी।
+- Browser खोलने की कोशिश करेगी।
+
+पहली बार internet चालू रखें, क्योंकि packages download होंगे। Start होने के बाद dashboard खोलने का address है:
+
+<http://127.0.0.1:5173>
+
+Full-screen wall display के लिए [start_kiosk.bat](./start_kiosk.bat) चलाएँ:
+
+```powershell
+.\start_kiosk.bat
+```
+
+### 4. अगर batch file से start न हो तो manual start
+
+PowerShell की दो windows खोलें। पहली window में backend चलाएँ:
+
+```powershell
+cd "C:\Users\YourName\Downloads\BEL-LIVE-SERVER"
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+```
+
+दूसरी window में frontend चलाएँ:
+
+```powershell
+cd "C:\Users\YourName\Downloads\BEL-LIVE-SERVER"
+npm install
+npm run dev
+```
+
+फिर browser में <http://127.0.0.1:5173> खोलें। दोनों windows बंद करने पर संबंधित services बंद हो जाएँगी।
+
+### 5. Backend health check
+
+यह address browser में खोलें:
+
+<http://127.0.0.1:8000/api/health>
+
+सही स्थिति में response इस प्रकार होगा:
+
+```json
+{"ok":true,"mode":"live","bind":"127.0.0.1"}
+```
+
+`127.0.0.1` का अर्थ है कि application केवल इसी PC पर accessible है। इसे `0.0.0.0` पर bind न करें, जब तक authentication, CORS और firewall की अलग security review न हो।
+
+### 6. पहली बार admin login
+
+Default password है:
+
+```text
+hactor@3200
+```
+
+यह password [data/admin.password](./data/admin.password) में रहता है और configuration drawer खोलने के लिए उपयोग होता है। Setup के बाद इस file का password बदलें, या project root में private `.env` file बनाकर strong password रखें:
+
+```env
+CYBERNOC_ADMIN_PASSWORD=अपना-मजबूत-private-password
+```
+
+`.env` और `data\admin.password` किसी दूसरे व्यक्ति को न दें और GitHub पर upload न करें।
+
+### 7. Real network monitors configure करना
+
+पहली बार backend start होने पर [data/monitors.json](./data/monitors.json) बनती है। Example values [config/monitors.example.json](./config/monitors.example.json) में हैं। Example monitors disabled हैं और documentation-only IP addresses उपयोग करते हैं; उनसे real monitoring नहीं होगी।
+
+Configuration drawer में प्रत्येक monitor के लिए:
+
+1. `gateway_ip` में वास्तविक line/router gateway डालें।
+2. `target` में वास्तविक reachable server/service डालें।
+3. SAP/intranet के लिए approved internal application host चुनें।
+4. Internet के लिए organization-approved stable endpoint चुनें।
+5. Service check के लिए `tcp_port` या `http_url` configure करें।
+6. सही `interval`, failure threshold और recovery threshold रखें।
+7. Monitor को **enabled** करें और configuration save करें।
+
+`source_ip` खाली रखने पर Windows अपनी current route selection उपयोग करेगा। `source_ip` किसी route को install नहीं करता और remote traffic को अपने-आप किसी खास WAN से force नहीं करता। Per-WAN monitoring के लिए network administrator को Windows route/metric या network-side policy routing configure करनी होगी। Application routes या firewall settings में बदलाव नहीं करती।
+
+### 8. Optional SNMP और audio
+
+Throughput के लिए SNMP enable करना हो तो router का host, UDP port, interface index और read-only community configure करें। SNMPv2c इस implementation में supported है; dedicated read-only credential उपयोग करें और router पर monitoring PC तक access सीमित रखें। Application SNMP write requests नहीं भेजती।
+
+Audio alerts के लिए यह folder बनाएँ:
+
+```text
+C:\CyberNOC\audio
+```
+
+इसमें MP3/WAV files रखें और configuration drawer से DOWN, REPEAT और RECOVERED recordings चुनें। Browser autoplay रोक सकता है, इसलिए dashboard पर एक बार click/tap करके audio arm करें। Visual alerts audio के बिना भी काम करते हैं।
+
+### 9. Logs और troubleshooting
+
+Batch startup के logs project folder में मिलेंगे:
+
+- `backend.log` — FastAPI/Uvicorn errors
+- `frontend.log` — Vite errors
+
+अगर Python नहीं मिल रहा हो:
+
+```powershell
+py --version
+```
+
+अगर Node/npm नहीं मिल रहा हो:
+
+```powershell
+node --version
+npm --version
+```
+
+अगर port व्यस्त हो:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000
+Get-NetTCPConnection -LocalPort 5173
+```
+
+अगर readings नहीं आ रही हों तो monitor enabled है या नहीं, IP addresses सही हैं या नहीं, और Windows/network firewall ICMP/TCP/HTTP traffic block तो नहीं कर रहा है—यह जाँचें। ICMP blocked होने पर TCP/HTTP health check अधिक उपयोगी हो सकता है।
+
+### 10. Tests और production build
+
+Backend tests चलाने के लिए:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest backend\tests -q
+```
+
+Frontend production build जाँचने के लिए:
+
+```powershell
+npm run build
+```
+
+### 11. रोज़ application चलाने का तरीका
+
+1. PC पर project folder खोलें।
+2. `start_dashboard.bat` चलाएँ।
+3. Dashboard के लिए <http://127.0.0.1:5173> खोलें।
+4. काम समाप्त होने पर backend/frontend की command windows बंद करें।
+
+Windows login पर automatic kiosk startup चाहिए तो `start_kiosk.bat` का shortcut बनाकर `shell:startup` folder में रखें। इसे administrator के रूप में चलाने की सामान्यतः आवश्यकता नहीं है।
+
+### 12. Full-screen voice alert
+
+जब configured DOWN या RECOVERED audio वास्तव में play होता है, dashboard के ऊपर hacker/future-tech style का transparent floating alert दिखाई देता है:
+
+- लाल animated `WARNING // SERVER DOWN` — server/line down होने पर।
+- हरा animated `SERVER RESTORED` — service वापस आने पर।
+- Alert में संबंधित monitor का नाम और telemetry status दिखता है।
+- Audio समाप्त होने पर floating message अपने-आप हट जाता है।
+
+Browser autoplay policy के कारण पहली बार dashboard पर click/tap करना आवश्यक है। Audio file configured न होने या audio play न होने पर गलत visual alert नहीं दिखाया जाता। Floating alert card wall display पर बड़ा transparent panel, बड़ा status text, wider neon glow और mobile-responsive sizing के साथ दिखाई देता है।
+
+### 13. Compact NOC dashboard UI
+
+Dashboard को 16:9 wall display और desktop NOC use के लिए compact किया गया है। Header में BEL icon/favicon, condensed telemetry bar, tighter monitor cards और reduced empty spacing हैं। प्रत्येक line card में gateway के लिए Wi‑Fi icon और remote target के लिए signal icon दिखाई देता है:
+
+- Green — endpoint reachable
+- Red — endpoint not responding
+- Amber — अभी sample उपलब्ध नहीं
+
+Gateway और remote target की status checks independent हैं। Gateway का `REACHABLE`/`NO RESPONSE` text और icon केवल gateway probe से बदलता है; remote target का text और icon केवल target probe से बदलता है। इसलिए एक endpoint down होने पर दूसरे endpoint का status गलत तरीके से नहीं बदलेगा।
+
+Card entrance animation, neon borders, scanline/grid background और state-based green/red chart accents live monitoring को जल्दी पढ़ने में मदद करते हैं। छोटे screens पर layout अपने-आप single-column flow में बदल जाता है।
+
+### 14. Custom line और incident export
+
+Monitor configuration में **OTHER** monitor type चुनकर `CUSTOM LINE TYPE` में कोई भी label लिख सकते हैं, जैसे `VPN`, `MPLS`, `CCTV` या `DR LINK`। Display name और custom type दोनों save होकर dashboard पर दिखते हैं।
+
+Header के download icon से incident logs CSV में export किए जा सकते हैं:
+
+1. Configuration drawer खोलें।
+2. `FROM` और `TO` dates चुनें।
+3. `EXPORT EXCEL CSV` दबाएँ।
+4. Admin login आवश्यक होने पर उसी drawer में sign in करें।
+
+Export में प्रत्येक outage की एक Excel-friendly row होती है: `Down At (IST)`, `Recovered At (IST)`, `Total Downtime` और `Detail`। सभी times Indian Standard Time में `AM/PM` format में हैं। Date range अधिकतम 366 दिन की है।
+
+Metric colors:
+
+- RTT और packet loss normal होने पर green, warning threshold पार करने पर yellow और threshold के दोगुने पर red।
+- 24-hour uptime `99%+` पर green, `95–99%` पर yellow और `95%` से नीचे red।
+- Gateway और remote target दोनों में वही signal icon उपयोग होता है: reachable green, no response blinking red और no sample amber।
+
+Loss indicator behavior:
+
+- `0–35%` loss — green normal Wi‑Fi icon
+- `36–65%` loss — yellow Wi‑Fi icon
+- `66–100%` loss — red Wi‑Fi icon
+- Any line-down state — red disabled Wi‑Fi icon, regardless of the last numeric loss sample
+
+Loss और displayed daily uptime एक-दूसरे से जुड़े हैं और हमेशा कुल 100% बनाते हैं। Daily calculation हर भारतीय calendar day के `12:00 AM (IST)` से शुरू होती है, इसलिए दो मिनट का outage भी उसी दिन के uptime में शामिल होता है:
+
+```text
+UPTIME = 100 - LOSS
+```
+
+इसलिए यदि loss `35%` है तो uptime `65%` दिखेगा, और यदि loss `80%` है तो uptime `20%` दिखेगा। Monitoring samples के बीच का समय weighted रूप से calculate होता है; last sample से current time तक का interval भी शामिल है। Uptime के colors उलटे हैं:
+
+- `0–35%` uptime — red
+- `36–65%` uptime — yellow
+- `66–100%` uptime — green
+
+जब target का packet-loss sample उपलब्ध नहीं होता, दोनों metrics `---` दिखाते हैं; इस स्थिति में fabricated uptime नहीं दिखाया जाता।

@@ -50,7 +50,8 @@ class MonitorConfig(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid4()), pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     name: str = Field(min_length=1, max_length=80)
-    type: Literal["sap_intranet", "internet", "server"]
+    type: Literal["sap_intranet", "internet", "server", "other"]
+    custom_type: str | None = Field(default=None, max_length=40)
     enabled: bool = True
     gateway_ip: str
     target: str

@@ -8,7 +8,7 @@ import socket
 import subprocess
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -225,6 +225,10 @@ class MonitorEngine:
                     self.tasks[monitor.id] = asyncio.create_task(self._run_monitor(monitor), name=f"monitor-{monitor.id}")
 
     def snapshot(self) -> dict[str, Any]:
+        ist = timezone(timedelta(hours=5, minutes=30), name="IST")
+        today_ist = datetime.now(ist).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = today_ist.astimezone(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         monitors = []
         for monitor in self.monitors.values():
             state = self.state.get(monitor.id, {})
@@ -238,14 +242,22 @@ class MonitorEngine:
                 "status": visible_status,
                 "failure_count": state.get("failure_count", 0),
                 "last_check": latest.get("checked_at") if latest else None,
-                "gateway_reachable": latest.get("gateway_reachable") if latest else None,
-                "target_reachable": latest.get("target_reachable") if latest else None,
+                "gateway_reachable": (
+                    bool(latest["gateway_reachable"])
+                    if latest and latest.get("gateway_reachable") is not None
+                    else None
+                ),
+                "target_reachable": (
+                    bool(latest["target_reachable"])
+                    if latest and latest.get("target_reachable") is not None
+                    else None
+                ),
                 "gateway_latency_ms": latest.get("gateway_latency_ms") if latest else None,
                 "latency_ms": latest.get("latency_ms") if latest else None,
                 "packet_loss_pct": latest.get("packet_loss_pct") if latest else None,
                 "rx_bps": latest.get("rx_bps") if latest else None,
                 "tx_bps": latest.get("tx_bps") if latest else None,
-                "uptime_pct_24h": self.store.uptime_pct(monitor.id),
+                "uptime_pct_24h": self.store.daily_uptime_pct(monitor.id, day_start, now),
                 "route_strategy": "source-address" if monitor.source_ip else "windows-default-route",
                 "history": samples,
             })

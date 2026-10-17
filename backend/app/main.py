@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hmac
+import io
 import secrets
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from .audio import list_audio_files, safe_audio_file
 from .config import AUDIO_DIR, CONFIG_PATH, DATA_DIR, DATABASE_PATH, ensure_admin_password, load_monitors, save_monitors
 from .database import HistoryStore
 from .models import AdminLogin, AudioTest, MonitorConfig, MonitorList
 from .monitoring import MonitorEngine
+from .system_metrics import SystemMetrics
 
 
 class LocalBus:
@@ -45,13 +49,22 @@ async def lifespan(app: FastAPI):
     app.state.login_attempts = {}
     app.state.bus = LocalBus()
     app.state.store = HistoryStore(DATABASE_PATH)
-    app.state.engine = MonitorEngine(load_monitors(), app.state.store, app.state.bus.publish)
+    app.state.system_metrics = SystemMetrics(DATA_DIR)
+    await app.state.system_metrics.start()
+
+    async def publish(message: dict):
+        if message.get("type") == "snapshot":
+            message["data"]["system"] = app.state.system_metrics.snapshot()
+        await app.state.bus.publish(message)
+
+    app.state.engine = MonitorEngine(load_monitors(), app.state.store, publish)
     await app.state.engine.start()
     print(f"BEL CyberNOC API ready on loopback. Monitor config: {CONFIG_PATH}")
     if not Path(".env").exists():
         print(f"Admin password is stored in {DATA_DIR / 'admin.password'}; keep this file private.")
     yield
     await app.state.engine.stop()
+    await app.state.system_metrics.stop()
 
 
 app = FastAPI(title="BEL CyberNOC Local API", version="1.0.0", lifespan=lifespan)
@@ -67,6 +80,12 @@ app.add_middleware(
 def require_loopback(request: Request) -> None:
     if not request.client or request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
         raise HTTPException(status_code=403, detail="Loopback clients only")
+
+
+def dashboard_snapshot(application: FastAPI) -> dict:
+    snapshot = application.state.engine.snapshot()
+    snapshot["system"] = application.state.system_metrics.snapshot()
+    return snapshot
 
 
 async def require_admin(request: Request, authorization: str | None = Header(default=None)) -> str:
@@ -115,13 +134,58 @@ async def logout(request: Request, token: str = Depends(require_admin)):
 @app.get("/api/dashboard")
 async def dashboard(request: Request):
     require_loopback(request)
-    return request.app.state.engine.snapshot()
+    return dashboard_snapshot(request.app)
 
 
 @app.get("/api/audio/files")
 async def audio_files(request: Request):
     require_loopback(request)
     return {"files": list_audio_files(AUDIO_DIR)}
+
+
+@app.get("/api/admin/incidents/export")
+async def export_incidents(
+    request: Request,
+    start: date,
+    end: date,
+    _: str = Depends(require_admin),
+):
+    if end < start:
+        raise HTTPException(status_code=422, detail="End date must not be before start date")
+    if (end - start).days > 366:
+        raise HTTPException(status_code=422, detail="Export range cannot exceed 366 days")
+    ist = timezone(timedelta(hours=5, minutes=30), name="IST")
+    start_at = datetime.combine(start, datetime.min.time(), tzinfo=ist).astimezone(timezone.utc).isoformat()
+    end_at = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=ist).astimezone(timezone.utc).isoformat()
+    rows = request.app.state.store.incident_rows_between(start_at, end_at)
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["Incident ID", "Monitor", "Down At (IST)", "Recovered At (IST)", "Total Downtime", "Detail"],
+    )
+    writer.writeheader()
+    for row in rows:
+        down_at = datetime.fromisoformat(row["occurred_at"]).astimezone(ist)
+        recovered_at = datetime.fromisoformat(row["resolved_at"]).astimezone(ist) if row["resolved_at"] else None
+        duration = "ONGOING"
+        if recovered_at:
+            seconds = max(0, int((recovered_at - down_at).total_seconds()))
+            duration = f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+        writer.writerow({
+            "Incident ID": row["id"],
+            "Monitor": row["monitor_name"],
+            "Down At (IST)": down_at.strftime("%d-%m-%Y %I:%M:%S %p"),
+            "Recovered At (IST)": recovered_at.strftime("%d-%m-%Y %I:%M:%S %p") if recovered_at else "—",
+            "Total Downtime": duration,
+            "Detail": row["detail"],
+        })
+    content = "\ufeff" + output.getvalue()
+    output.seek(0)
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="cybernoc-incidents-{start.isoformat()}-to-{end.isoformat()}.csv"'},
+    )
 
 
 @app.get("/api/audio/{filename}")
@@ -168,7 +232,7 @@ async def websocket_feed(websocket: WebSocket):
     queue: asyncio.Queue = asyncio.Queue(maxsize=5)
     bus.clients.add(queue)
     try:
-        await websocket.send_json({"type": "snapshot", "data": websocket.app.state.engine.snapshot()})
+        await websocket.send_json({"type": "snapshot", "data": dashboard_snapshot(websocket.app)})
         while True:
             message = await queue.get()
             await websocket.send_json(message)

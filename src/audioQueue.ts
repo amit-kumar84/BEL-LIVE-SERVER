@@ -1,10 +1,21 @@
 type Alert = { monitorId: string; filename: string; kind: string; eventId: string };
+export type AlertPlayback = Alert & { phase: 'started' | 'ended' };
 
 export class AlertAudioQueue {
   private queue: Alert[] = [];
   private active = false;
   private announced = new Set<string>();
   private unlocked = false;
+  private listeners = new Set<(playback: AlertPlayback) => void>();
+
+  subscribe(listener: (playback: AlertPlayback) => void) {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private notify(playback: AlertPlayback) {
+    for (const listener of this.listeners) listener(playback);
+  }
 
   unlock() {
     this.unlocked = true;
@@ -26,10 +37,12 @@ export class AlertAudioQueue {
     try {
       const audio = new Audio(`http://127.0.0.1:8000/api/audio/${encodeURIComponent(alert.filename)}`);
       await audio.play();
+      this.notify({ ...alert, phase: 'started' });
       await new Promise<void>((resolve) => {
         audio.onended = () => resolve();
         audio.onerror = () => resolve();
       });
+      this.notify({ ...alert, phase: 'ended' });
     } catch {
       this.announced.delete(alert.eventId);
     } finally {

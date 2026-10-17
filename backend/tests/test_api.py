@@ -39,3 +39,17 @@ def test_loopback_health_and_audio_traversal_protection():
         assert client.get("/api/health").json()["bind"] == "127.0.0.1"
         response = client.get("/api/audio/..%5C..%5Csecret.wav")
         assert response.status_code == 404
+
+
+def test_dashboard_includes_host_resource_metrics():
+    with TestClient(app) as client:
+        response = client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    system = response.json()["system"]
+    assert set(system) == {
+        "cpu_percent", "ram_used_bytes", "ram_total_bytes", "ram_percent",
+        "storage_used_bytes", "storage_total_bytes", "storage_percent", "sampled_at",
+    }
+    for key in ("cpu_percent", "ram_percent", "storage_percent"):
+        assert system[key] is None or 0 <= system[key] <= 100

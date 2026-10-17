@@ -117,11 +117,42 @@ class HistoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def uptime_pct(self, monitor_id: str, hours: int = 24) -> float | None:
-        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    def events_between(self, start: str, end: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT AVG(CASE WHEN target_reachable = 1 THEN 1.0 ELSE 0.0 END) AS ratio, COUNT(*) AS total FROM samples WHERE monitor_id = ? AND checked_at >= ?",
-                (monitor_id, since),
-            ).fetchone()
-        return round(float(row["ratio"]) * 100, 2) if row and row["total"] else None
+            rows = connection.execute(
+                "SELECT id, monitor_id, monitor_name, occurred_at, kind, detail, resolved_at "
+                "FROM events WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at ASC, id ASC",
+                (start, end),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def incident_rows_between(self, start: str, end: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, monitor_name, occurred_at, detail, resolved_at FROM events "
+                "WHERE kind = 'down' AND occurred_at >= ? AND occurred_at < ? "
+                "ORDER BY occurred_at ASC, id ASC",
+                (start, end),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def daily_uptime_pct(self, monitor_id: str, day_start: str, now: str) -> float | None:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT checked_at, target_reachable FROM samples "
+                "WHERE monitor_id = ? AND checked_at >= ? AND checked_at <= ? ORDER BY checked_at ASC",
+                (monitor_id, day_start, now),
+            ).fetchall()
+        if not rows:
+            return None
+        end_time = datetime.fromisoformat(now)
+        total_seconds = 0.0
+        online_seconds = 0.0
+        for index, row in enumerate(rows):
+            checked_at = datetime.fromisoformat(row["checked_at"])
+            next_time = datetime.fromisoformat(rows[index + 1]["checked_at"]) if index + 1 < len(rows) else end_time
+            seconds = max(0.0, (next_time - checked_at).total_seconds())
+            total_seconds += seconds
+            if row["target_reachable"] == 1:
+                online_seconds += seconds
+        return round(online_seconds / total_seconds * 100, 2) if total_seconds else None

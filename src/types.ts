@@ -1,10 +1,11 @@
-export type MonitorType = 'sap_intranet' | 'internet' | 'server';
+export type MonitorType = 'sap_intranet' | 'internet' | 'server' | 'other';
 export type MonitorStatus = 'unknown' | 'online' | 'degraded' | 'down' | 'disabled' | 'gateway_down' | 'upstream_down' | 'application_down';
 
 export interface MonitorConfig {
   id: string;
   name: string;
   type: MonitorType;
+  custom_type: string | null;
   enabled: boolean;
   gateway_ip: string;
   target: string;
@@ -64,4 +65,16 @@ export interface DashboardData {
   monitors: MonitorView[];
   events: EventItem[];
   server_time: string;
+  system?: SystemMetrics;
+}
+
+export interface SystemMetrics {
+  cpu_percent: number | null;
+  ram_used_bytes: number | null;
+  ram_total_bytes: number | null;
+  ram_percent: number | null;
+  storage_used_bytes: number | null;
+  storage_total_bytes: number | null;
+  storage_percent: number | null;
+  sampled_at: string | null;
 }
