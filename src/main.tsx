@@ -1,3 +1,4 @@
+// BEL Cyber Network Operations Status — frontend application bootstrap.
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import '@fontsource/rajdhani/400.css';

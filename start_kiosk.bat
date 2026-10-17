@@ -1,4 +1,5 @@
 @echo off
+rem BEL Cyber Network Operations Status - Edge kiosk launcher.
 call "%~dp0start_dashboard.bat" --no-browser
 if errorlevel 1 exit /b 1
 set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"

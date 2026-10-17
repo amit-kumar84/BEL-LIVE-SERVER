@@ -1,3 +1,4 @@
+// BEL Cyber Network Operations Status — queued visual/audio incident alerts.
 type Alert = { monitorId: string; filename: string; kind: string; eventId: string };
 export type AlertPlayback = Alert & { phase: 'started' | 'ended' };
 

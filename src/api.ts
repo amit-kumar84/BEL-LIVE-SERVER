@@ -1,3 +1,4 @@
+// BEL Cyber Network Operations Status — loopback API client.
 const API = 'http://127.0.0.1:8000';
 
 export async function api<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {

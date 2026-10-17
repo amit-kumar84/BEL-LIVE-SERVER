@@ -1,3 +1,4 @@
+// BEL Cyber Network Operations Status — shared frontend telemetry contracts.
 export type MonitorType = 'sap_intranet' | 'internet' | 'server' | 'other';
 export type MonitorStatus = 'unknown' | 'online' | 'degraded' | 'down' | 'disabled' | 'gateway_down' | 'upstream_down' | 'application_down';
 
@@ -16,6 +17,7 @@ export interface MonitorConfig {
   latency_warning_ms: number;
   packet_loss_warning_pct: number;
   source_ip: string | null;
+  throughput_enabled: boolean;
   tcp_port: number | null;
   http_url: string | null;
   snmp: { enabled: boolean; host: string | null; port: number; community: string | null; interface_index: number | null; counter_bits: 32 | 64 };

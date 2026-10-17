@@ -1,3 +1,4 @@
+# BEL Cyber Network Operations Status — probes, state transitions, and throughput collection.
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +12,8 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
+
+import psutil
 
 from .config import save_monitors
 from .database import HistoryStore
@@ -172,6 +175,26 @@ async def snmp_counters(config: MonitorConfig) -> tuple[int, int] | None:
         return None
 
 
+def local_interface_counters(source_ip: str | None = None) -> tuple[int, int] | None:
+    interfaces = psutil.net_io_counters(pernic=True)
+    if not interfaces:
+        return None
+    selected_name: str | None = None
+    if source_ip:
+        for name, addresses in psutil.net_if_addrs().items():
+            if any(address.address.split("%", 1)[0] == source_ip for address in addresses if address.family == socket.AF_INET):
+                selected_name = name
+                break
+    stats = psutil.net_if_stats()
+    candidates = [name for name in interfaces if not name.lower().startswith(("loopback", "lo"))]
+    if selected_name is None:
+        selected_name = next((name for name in candidates if stats.get(name) and stats[name].isup), None)
+    counters = interfaces.get(selected_name) if selected_name else None
+    if counters is None:
+        return None
+    return counters.bytes_recv, counters.bytes_sent
+
+
 class MonitorEngine:
     def __init__(self, monitors: list[MonitorConfig], store: HistoryStore, publish):
         self.monitors = {monitor.id: monitor for monitor in monitors}
@@ -179,7 +202,7 @@ class MonitorEngine:
         self.publish = publish
         self.tasks: dict[str, asyncio.Task] = {}
         self.state: dict[str, dict[str, Any]] = {}
-        self.bandwidth_previous: dict[str, tuple[int, int, float]] = {}
+        self.bandwidth_previous: dict[str, tuple[int, int, float, str]] = {}
         self.running = False
 
     def _initial_state(self, monitor: MonitorConfig) -> dict[str, Any]:
@@ -293,16 +316,21 @@ class MonitorEngine:
                 loss = sum(loss_window) / len(loss_window)
                 if raw_status == "online" and loss >= monitor.packet_loss_warning_pct and loss > 0:
                     raw_status = "degraded"
-                counters = await snmp_counters(monitor)
+                counters = await snmp_counters(monitor) if monitor.throughput_enabled else None
+                counter_source = "snmp"
+                if counters is None and monitor.throughput_enabled:
+                    counters = await asyncio.to_thread(local_interface_counters, monitor.source_ip)
+                    counter_source = "local"
                 rx_bps = tx_bps = None
                 if counters:
                     now = time.monotonic()
                     previous = self.bandwidth_previous.get(monitor.id)
-                    if previous:
-                        prior_rx, prior_tx, prior_at = previous
-                        rx_bps = bandwidth_delta(prior_rx, counters[0], now - prior_at, monitor.snmp.counter_bits)
-                        tx_bps = bandwidth_delta(prior_tx, counters[1], now - prior_at, monitor.snmp.counter_bits)
-                    self.bandwidth_previous[monitor.id] = (counters[0], counters[1], now)
+                    if previous and previous[3] == counter_source:
+                        prior_rx, prior_tx, prior_at, _ = previous
+                        counter_bits = monitor.snmp.counter_bits if counter_source == "snmp" else 64
+                        rx_bps = bandwidth_delta(prior_rx, counters[0], now - prior_at, counter_bits)
+                        tx_bps = bandwidth_delta(prior_tx, counters[1], now - prior_at, counter_bits)
+                    self.bandwidth_previous[monitor.id] = (counters[0], counters[1], now, counter_source)
 
                 state, transition = update_state(state, raw_status, monitor)
                 checked_at = utc_now()

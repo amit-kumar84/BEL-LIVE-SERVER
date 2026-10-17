@@ -1,3 +1,4 @@
+# BEL Cyber Network Operations Status — validated API and monitor configuration models.
 from __future__ import annotations
 
 import ipaddress
@@ -62,6 +63,7 @@ class MonitorConfig(BaseModel):
     latency_warning_ms: float = Field(default=150, gt=0, le=60000)
     packet_loss_warning_pct: float = Field(default=5, ge=0, le=100)
     source_ip: str | None = None
+    throughput_enabled: bool = True
     tcp_port: int | None = Field(default=None, ge=1, le=65535)
     http_url: str | None = Field(default=None, max_length=2048)
     snmp: SnmpConfig = Field(default_factory=SnmpConfig)

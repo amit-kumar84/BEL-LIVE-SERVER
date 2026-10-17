@@ -1,3 +1,4 @@
+# BEL Cyber Network Operations Status — safe local audio file handling.
 from __future__ import annotations
 
 from pathlib import Path

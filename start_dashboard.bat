@@ -1,4 +1,5 @@
 @echo off
+rem BEL Cyber Network Operations Status - local development launcher.
 setlocal EnableExtensions
 cd /d "%~dp0"
 set "ROOT=%CD%"

@@ -1,3 +1,4 @@
+# BEL Cyber Network Operations Status — local configuration and runtime paths.
 from __future__ import annotations
 
 import json

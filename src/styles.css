@@ -1,3 +1,4 @@
+/* BEL Cyber Network Operations Status — cyber-operations dashboard theme. */
 :root {
   font-family: 'Rajdhani', sans-serif;
   color: #e0e0e0;
@@ -109,6 +110,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 @keyframes local-time-blink { 0%, 92%, 100% { opacity: 1; } 94%, 97% { opacity: .55; } }
 .simulation-banner { min-height: 28px; flex: 0 0 28px; color: #ffe18d; border-bottom: 1px solid #facc1555; background: #30260880; display: flex; align-items: center; gap: 8px; padding: 0 10px; font: 10px var(--mono); }
 .simulation-banner button { display: flex; gap: 5px; align-items: center; margin-left: auto; color: #ffe18d; border: 0; background: transparent; cursor: pointer; font: 9px var(--mono); }
+.form-hint { color: #71808a; margin: -3px 0 9px; font: 8px var(--mono); }
 .section-heading { min-height: 47px; flex: 0 0 47px; display: flex; align-items: center; justify-content: space-between; }
 .section-heading > div:first-child { display: flex; align-items: baseline; gap: 12px; }
 .section-index { color: var(--cyan); font-size: 10px; }

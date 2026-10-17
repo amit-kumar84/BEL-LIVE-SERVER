@@ -1,3 +1,4 @@
+# BEL Cyber Network Operations Status — SQLite history and incident persistence.
 from __future__ import annotations
 
 import sqlite3

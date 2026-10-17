@@ -1,3 +1,4 @@
+// BEL Cyber Network Operations Status — Vite development and build configuration.
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
