@@ -20,6 +20,11 @@ from .database import HistoryStore
 from .models import MonitorConfig
 
 DEFAULT_ALERT_REPEAT_MINUTES = 30
+ARP_ENTRY_RE = re.compile(
+    r"^\s*(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+"
+    r"(?P<mac>[0-9a-f]{2}(?:-[0-9a-f]{2}){5})\s+(?P<kind>\w+)\s*$",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -195,6 +200,73 @@ def local_interface_counters(source_ip: str | None = None) -> tuple[int, int] | 
     return counters.bytes_recv, counters.bytes_sent
 
 
+def parse_arp_entries(output: str) -> set[str]:
+    """Return valid IPv4 addresses currently present in Windows ARP output."""
+    entries: set[str] = set()
+    for line in output.splitlines():
+        match = ARP_ENTRY_RE.match(line)
+        if not match:
+            continue
+        try:
+            ipaddress.ip_address(match.group("ip"))
+        except ValueError:
+            continue
+        entries.add(match.group("ip"))
+    return entries
+
+
+def _local_network_for(endpoint: str, source_ip: str | None) -> ipaddress.IPv4Network | None:
+    try:
+        endpoint_ip = ipaddress.ip_address(endpoint)
+    except ValueError:
+        return None
+    if not isinstance(endpoint_ip, ipaddress.IPv4Address):
+        return None
+    addresses = psutil.net_if_addrs()
+    preferred: list[tuple[str, str, str]] = []
+    for name, values in addresses.items():
+        for value in values:
+            if value.family != socket.AF_INET or not value.netmask:
+                continue
+            if source_ip and value.address == source_ip:
+                preferred.insert(0, (name, value.address, value.netmask))
+            elif endpoint_ip in ipaddress.ip_network(f"{value.address}/{value.netmask}", strict=False):
+                preferred.append((name, value.address, value.netmask))
+    for _, address, netmask in preferred:
+        try:
+            network = ipaddress.ip_network(f"{address}/{netmask}", strict=False)
+        except ValueError:
+            continue
+        if endpoint_ip in network:
+            return network
+    return None
+
+
+def connected_clients(endpoint: str, source_ip: str | None = None) -> dict[str, Any]:
+    """Estimate active local clients from the endpoint's Windows ARP subnet."""
+    network = _local_network_for(endpoint, source_ip)
+    if network is None:
+        return {"count": None, "source": "unavailable", "endpoint": endpoint}
+    try:
+        completed = subprocess.run(
+            ["arp", "-a"], capture_output=True, text=True, timeout=3,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"count": None, "source": "unavailable", "endpoint": endpoint}
+    if completed.returncode != 0:
+        return {"count": None, "source": "unavailable", "endpoint": endpoint}
+    excluded = {endpoint}
+    if source_ip:
+        excluded.add(source_ip)
+    clients = {
+        address for address in parse_arp_entries(completed.stdout)
+        if ipaddress.ip_address(address) in network and address not in excluded
+    }
+    return {"count": len(clients), "source": "windows-arp", "endpoint": endpoint}
+
+
 class MonitorEngine:
     def __init__(self, monitors: list[MonitorConfig], store: HistoryStore, publish):
         self.monitors = {monitor.id: monitor for monitor in monitors}
@@ -282,6 +354,7 @@ class MonitorEngine:
                 "tx_bps": latest.get("tx_bps") if latest else None,
                 "uptime_pct_24h": self.store.daily_uptime_pct(monitor.id, day_start, now),
                 "route_strategy": "source-address" if monitor.source_ip else "windows-default-route",
+                "connected_clients": state.get("connected_clients", {"count": None, "source": "awaiting-sample", "endpoint": monitor.gateway_ip}),
                 "history": samples,
             })
         return {"monitors": monitors, "events": self.store.recent_events(), "server_time": utc_now()}
@@ -331,6 +404,11 @@ class MonitorEngine:
                         rx_bps = bandwidth_delta(prior_rx, counters[0], now - prior_at, counter_bits)
                         tx_bps = bandwidth_delta(prior_tx, counters[1], now - prior_at, counter_bits)
                     self.bandwidth_previous[monitor.id] = (counters[0], counters[1], now, counter_source)
+                client_endpoint = monitor.gateway_ip
+                client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
+                if client_data["count"] is None:
+                    client_endpoint = monitor.target
+                    client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
 
                 state, transition = update_state(state, raw_status, monitor)
                 checked_at = utc_now()
@@ -343,6 +421,7 @@ class MonitorEngine:
                     "gateway_latency_ms": gateway["latency_ms"], "latency_ms": target["latency_ms"],
                     "packet_loss_pct": loss, "rx_bps": rx_bps, "tx_bps": tx_bps,
                 }
+                state["connected_clients"] = client_data
                 self.store.save_sample(sample)
                 if transition:
                     event = {

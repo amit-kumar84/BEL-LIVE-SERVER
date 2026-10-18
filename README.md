@@ -13,6 +13,7 @@ Local network monitoring dashboard for Windows, built for operational visibility
 - React 19 + Vite dashboard with a cyber-operations visual system.
 - FastAPI monitoring engine with SQLite history and WebSocket telemetry.
 - Independent gateway and remote-target reachability states.
+- Per-line observed connected-client count from the Windows ARP table.
 - ICMP reachability, RTT, packet loss, daily IST uptime, TCP checks, and HTTP(S) health checks.
 - Configurable failure/recovery thresholds and incident audio alerts.
 - Large visual down/restored alerts synchronized with audio playback.
@@ -20,6 +21,11 @@ Local network monitoring dashboard for Windows, built for operational visibility
 - Per-monitor `RX / TX SPEED` enable/disable control.
 - Authenticated monitor configuration and IST-formatted incident CSV export.
 - Loopback-only default binding for local operation.
+
+Connected-client counts are labeled **observed** because a generic gateway cannot
+expose its complete DHCP/Wi-Fi client list through ARP alone. For an exact
+enterprise count, integrate the gateway, DHCP server, wireless controller, or
+SNMP vendor-specific client OIDs.
 
 ## Requirements
 
@@ -51,6 +57,9 @@ For Microsoft Edge kiosk mode:
 ```powershell
 .\start_kiosk.bat
 ```
+
+For the complete Windows Service and automatic full-screen startup setup, see
+[COMMAND_GUIDE.md](./COMMAND_GUIDE.md).
 
 The first startup requires internet access to download dependencies. Runtime monitoring does not use a cloud service.
 

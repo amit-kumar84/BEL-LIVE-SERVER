@@ -64,6 +64,7 @@ class MonitorConfig(BaseModel):
     packet_loss_warning_pct: float = Field(default=5, ge=0, le=100)
     source_ip: str | None = None
     throughput_enabled: bool = True
+    active_nodes_visible: bool = True
     tcp_port: int | None = Field(default=None, ge=1, le=65535)
     http_url: str | None = Field(default=None, max_length=2048)
     snmp: SnmpConfig = Field(default_factory=SnmpConfig)

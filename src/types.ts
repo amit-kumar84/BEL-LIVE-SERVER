@@ -18,6 +18,7 @@ export interface MonitorConfig {
   packet_loss_warning_pct: number;
   source_ip: string | null;
   throughput_enabled: boolean;
+  active_nodes_visible: boolean;
   tcp_port: number | null;
   http_url: string | null;
   snmp: { enabled: boolean; host: string | null; port: number; community: string | null; interface_index: number | null; counter_bits: 32 | 64 };
@@ -50,6 +51,7 @@ export interface MonitorView {
   tx_bps: number | null;
   uptime_pct_24h: number | null;
   route_strategy: string;
+  connected_clients: { count: number | null; source: string; endpoint: string };
   history: Sample[];
 }
 

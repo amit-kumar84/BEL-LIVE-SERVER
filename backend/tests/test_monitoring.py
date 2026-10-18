@@ -4,7 +4,7 @@ import pytest
 from app.audio import safe_audio_file
 from app.database import HistoryStore
 from app.models import MonitorConfig
-from app.monitoring import bandwidth_delta, down_alert_due, should_emit_down_reminder, update_state
+from app.monitoring import bandwidth_delta, down_alert_due, parse_arp_entries, should_emit_down_reminder, update_state
 
 
 def config(**overrides):
@@ -87,6 +87,17 @@ def test_bandwidth_handles_counter_wrap_and_reset():
     assert bandwidth_delta((1 << 32) - 20, 10, 1, 32) == 240
     assert bandwidth_delta(9000, 20, 1, 32) is None
     assert bandwidth_delta(20, 30, 0, 32) is None
+
+
+def test_parse_arp_entries_returns_only_valid_ipv4_rows():
+    output = """
+Interface: 192.168.1.5 --- 0x6
+  Internet Address      Physical Address      Type
+  192.168.1.1           aa-bb-cc-dd-ee-ff     dynamic
+  192.168.1.25          11-22-33-44-55-66     dynamic
+  invalid               xx-xx-xx-xx-xx-xx     dynamic
+"""
+    assert parse_arp_entries(output) == {"192.168.1.1", "192.168.1.25"}
 
 
 def test_history_returns_gateway_and_target_reachability(tmp_path):

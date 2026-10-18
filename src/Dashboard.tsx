@@ -1,14 +1,29 @@
 // BEL Cyber Network Operations Status — primary operations dashboard surface.
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, AudioLines, Check, ChevronRight, CircleHelp, Clock3, Download, Gauge, LockKeyhole, LogOut, Maximize, Network, Plus, Radio, Router, Settings2, ShieldCheck, Signal, Wifi, WifiOff, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, AudioLines, Check, ChevronRight, CircleHelp, Clock3, Download, Gauge, LockKeyhole, LogOut, Maximize, Monitor, Moon, Network, Plus, Radio, Router, Settings2, ShieldCheck, Signal, Sun, Wifi, WifiOff, X } from 'lucide-react';
 import { api, websocketUrl } from './api';
 import { alertAudio } from './audioQueue';
 import type { DashboardData, EventItem, MonitorConfig, MonitorView, Sample } from './types';
 
 const emptyData: DashboardData = { monitors: [], events: [], server_time: '' };
+type DisplayTheme = 'cybertech' | 'classic' | 'modern';
+type ModernColorMode = 'light' | 'dark';
 const statusLabels: Record<string, string> = { online: 'OPERATIONAL', degraded: 'DEGRADED', down: 'OFFLINE', gateway_down: 'GATEWAY DOWN', upstream_down: 'UPSTREAM LOST', application_down: 'APP FAILURE', unknown: 'AWAITING PROBE', disabled: 'DISABLED' };
+const bootSequence = [
+  'BEL CORE INITIALIZATION',
+  'SECURE KERNEL HANDSHAKE',
+  'NEURAL TELEMETRY LINK ESTABLISHED',
+  'NETWORK TOPOLOGY SYNCHRONIZED',
+  'PROBE ENGINE CALIBRATION COMPLETE',
+  'THREAT MONITORING GRID ONLINE',
+  'ALL CORE SYSTEMS OPERATIONAL',
+  'WELCOME, ADMINISTRATOR',
+];
+const bootAudioFiles = ['/START-ENGLISH-Futuristic-Alert.mp3', '/START-HINDI-Futuristic-Alert.mp3'];
 
 function stamp(value: string | null | undefined) { return value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '--:--:--'; }
+function incidentDate(value: string | null | undefined) { return value ? new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(value)).toUpperCase() : '-- --- ----'; }
+function incidentStamp(value: string | null | undefined) { return value ? new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(new Date(value)) : '--:--:--'; }
 function elapsed(value: number) {
   const totalSeconds = Math.max(0, Math.floor(value / 1000));
   const days = Math.floor(totalSeconds / 86400);
@@ -53,34 +68,106 @@ function endpointLabel(value: boolean | number | null) {
   if (value === null) return 'NO SAMPLE';
   return value === false || value === 0 ? 'NO RESPONSE' : 'REACHABLE';
 }
+function maskEndpoint(value: string, masked: boolean) {
+  if (!masked || !value) return value;
+  const parts = value.split('.');
+  if (parts.length === 4 && parts.every((part) => /^\d+$/.test(part))) return `${parts[0]}.${parts[1]}.***.***`;
+  if (value.length <= 4) return '***';
+  return `${value.slice(0, 3)}***`;
+}
 
 function createMonitor(): MonitorConfig {
-  return { id: crypto.randomUUID().replaceAll('-', '').slice(0, 12), name: 'NEW MONITOR', type: 'internet', custom_type: null, enabled: true, gateway_ip: '', target: '', interval_seconds: 5, timeout_ms: 1200, failure_threshold: 3, recovery_threshold: 2, latency_warning_ms: 150, packet_loss_warning_pct: 5, source_ip: null, throughput_enabled: true, tcp_port: null, http_url: null, snmp: { enabled: false, host: null, port: 161, community: null, interface_index: null, counter_bits: 64 }, audio_down: null, audio_recovered: null, audio_reminder: null, alert_repeat_minutes: 30 };
+  return { id: crypto.randomUUID().replaceAll('-', '').slice(0, 12), name: 'NEW MONITOR', type: 'internet', custom_type: null, enabled: true, gateway_ip: '', target: '', interval_seconds: 5, timeout_ms: 1200, failure_threshold: 3, recovery_threshold: 2, latency_warning_ms: 150, packet_loss_warning_pct: 5, source_ip: null, throughput_enabled: true, active_nodes_visible: true, tcp_port: null, http_url: null, snmp: { enabled: false, host: null, port: 161, community: null, interface_index: null, counter_bits: 64 }, audio_down: null, audio_recovered: null, audio_reminder: null, alert_repeat_minutes: 30 };
 }
 
 export default function Dashboard() {
   const [data, setData] = useState(emptyData);
   const [backend, setBackend] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [removeConfirmation, setRemoveConfirmation] = useState<{ id: string; name: string } | null>(null);
   const [adminToken, setAdminToken] = useState(sessionStorage.getItem('cybernoc-admin') || '');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [failedLoginAttempts, setFailedLoginAttempts] = useState(0);
+  const [securityWarning, setSecurityWarning] = useState(false);
   const [audioFiles, setAudioFiles] = useState<string[]>([]);
   const [editing, setEditing] = useState<MonitorConfig | null>(null);
   const [clock, setClock] = useState(new Date());
   const [notice, setNotice] = useState('');
   const [audioAlert, setAudioAlert] = useState<{ kind: 'down' | 'recovered' | 'down-reminder'; monitorName: string } | null>(null);
+  const [showBootSequence, setShowBootSequence] = useState(true);
+  const [bootStep, setBootStep] = useState(0);
+  const [bootProgress, setBootProgress] = useState(0);
+  const [bootAudioSource] = useState(() => bootAudioFiles[Math.floor(Math.random() * bootAudioFiles.length)]);
+  const [backendOfflineAlertShown, setBackendOfflineAlertShown] = useState(false);
   const [exportDates, setExportDates] = useState({ start: istDate(), end: istDate() });
   const [sim, setSim] = useState(false);
   const [simulationCycle, setSimulationCycle] = useState(0);
+  const [displayTheme, setDisplayTheme] = useState<DisplayTheme>(() => {
+    const saved = window.localStorage.getItem('bel-cybernoc-theme');
+    return saved === 'classic' || saved === 'modern' ? saved : 'cybertech';
+  });
+  const [modernColorMode, setModernColorMode] = useState<ModernColorMode>(() => window.localStorage.getItem('bel-cybernoc-modern-mode') === 'dark' ? 'dark' : 'light');
   const [cardsPerRow, setCardsPerRow] = useState(() => {
     const saved = Number(window.localStorage.getItem('bel-cybernoc-columns'));
     return [2, 3, 4].includes(saved) ? saved : 2;
   });
+  const [maskedNetworkLines, setMaskedNetworkLines] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = window.localStorage.getItem('bel-cybernoc-mask-network-lines');
+      return saved ? JSON.parse(saved) as Record<string, boolean> : {};
+    } catch {
+      return {};
+    }
+  });
   const seenEvents = useRef(new Set<number>());
   const wsRef = useRef<WebSocket | null>(null);
+  const bootAudioRef = useRef<HTMLAudioElement | null>(null);
+  const backendOfflineAudioRef = useRef<HTMLAudioElement | null>(null);
+  const accessGrantedAudioRef = useRef<HTMLAudioElement | null>(null);
+  const accessDeniedAudioRef = useRef<HTMLAudioElement | null>(null);
+  const securityWarningAudioRef = useRef<HTMLAudioElement | null>(null);
   const monitorsRef = useRef(data.monitors);
   monitorsRef.current = data.monitors;
+
+  useEffect(() => {
+    if (!showBootSequence) return;
+    setBootStep(0);
+    setBootProgress(0);
+    const audio = bootAudioRef.current;
+    if (!audio) return;
+    audio.currentTime = 0;
+    const updateProgress = () => {
+      if (!audio.duration || !Number.isFinite(audio.duration)) return;
+      const progress = Math.min(1, audio.currentTime / audio.duration);
+      setBootProgress(progress);
+      setBootStep(Math.min(bootSequence.length - 1, Math.floor(progress * bootSequence.length)));
+    };
+    const finishBoot = () => {
+      setBootProgress(1);
+      setBootStep(bootSequence.length - 1);
+      audio.pause();
+      setShowBootSequence(false);
+    };
+    const startAudio = () => void audio.play().catch((error: unknown) => {
+      if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play boot audio.', error);
+    });
+    const handleMetadata = () => {
+      window.setTimeout(() => {
+        if (!audio.ended) startAudio();
+      }, 0);
+    };
+    audio.addEventListener('loadedmetadata', handleMetadata);
+    audio.addEventListener('timeupdate', updateProgress);
+    audio.addEventListener('ended', finishBoot);
+    if (audio.readyState >= 1) handleMetadata();
+    return () => {
+      audio.removeEventListener('loadedmetadata', handleMetadata);
+      audio.removeEventListener('timeupdate', updateProgress);
+      audio.removeEventListener('ended', finishBoot);
+      audio.pause();
+    };
+  }, [showBootSequence]);
 
   useEffect(() => alertAudio.subscribe((playback) => {
     if (playback.phase === 'started') {
@@ -90,6 +177,23 @@ export default function Dashboard() {
       setAudioAlert(null);
     }
   }), []);
+
+  useEffect(() => {
+    if (backend) {
+      setBackendOfflineAlertShown(false);
+      backendOfflineAudioRef.current?.pause();
+      return;
+    }
+    if (showBootSequence || backendOfflineAlertShown) return;
+    setBackendOfflineAlertShown(true);
+    const audio = backendOfflineAudioRef.current;
+    if (audio) {
+      audio.currentTime = 0;
+      void audio.play().catch((error: unknown) => {
+        if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play backend offline audio.', error);
+      });
+    }
+  }, [backend, showBootSequence, backendOfflineAlertShown]);
 
   useEffect(() => {
     const expireAdminSession = () => {
@@ -164,12 +268,41 @@ export default function Dashboard() {
   const incidentEvents = useMemo(() => data.events
     .filter((event) => event.kind === 'down')
     .sort((first, second) => new Date(second.occurred_at).getTime() - new Date(first.occurred_at).getTime())
-    .slice(0, 5), [data.events]);
+    .slice(0, 4), [data.events]);
 
   async function signIn(event: React.FormEvent) {
     event.preventDefault(); setLoginError('');
-    try { const result = await api<{ token: string }>('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: loginPassword }) }); setAdminToken(result.token); sessionStorage.setItem('cybernoc-admin', result.token); setLoginPassword(''); }
-    catch (error) { setLoginError(error instanceof Error ? error.message : 'Sign in failed'); }
+    try {
+      const result = await api<{ token: string }>('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: loginPassword }) });
+      setAdminToken(result.token);
+      sessionStorage.setItem('cybernoc-admin', result.token);
+      setLoginPassword('');
+      setLoginError('');
+      setFailedLoginAttempts(0);
+      setSecurityWarning(false);
+      void playSecurityAudio(accessGrantedAudioRef);
+      setNotice('ACCESS GRANTED');
+    } catch (error) {
+      const nextAttempts = failedLoginAttempts + 1;
+      setFailedLoginAttempts(nextAttempts);
+      setLoginPassword('');
+      setLoginError('ACCESS DENIED — INCORRECT ADMIN PASSWORD');
+      if (nextAttempts > 3) {
+        setSecurityWarning(true);
+        void playSecurityAudio(securityWarningAudioRef);
+      } else {
+        void playSecurityAudio(accessDeniedAudioRef);
+      }
+    }
+  }
+
+  function playSecurityAudio(audioRef: { current: HTMLAudioElement | null }) {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.currentTime = 0;
+    void audio.play().catch((error: unknown) => {
+      if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play security audio.', error);
+    });
   }
 
   async function signOut() {
@@ -222,11 +355,25 @@ export default function Dashboard() {
     }
   }
 
-  async function removeMonitor(id: string) {
-    if (!adminToken || !window.confirm('Remove this monitor and stop its probe?')) return;
+  function removeMonitor(id: string, name: string) {
+    if (!adminToken) return;
+    setRemoveConfirmation({ id, name });
+  }
+
+  async function confirmRemoveMonitor() {
+    if (!adminToken || !removeConfirmation) return;
+    const { id } = removeConfirmation;
     const configs = data.monitors.map((item) => item.config).filter((item) => item.id !== id);
-    await api('/api/admin/monitors', { method: 'PUT', body: JSON.stringify({ monitors: configs }) }, adminToken);
-    setEditing(null); setData(await api<DashboardData>('/api/dashboard'));
+    try {
+      await api('/api/admin/monitors', { method: 'PUT', body: JSON.stringify({ monitors: configs }) }, adminToken);
+      setEditing(null);
+      setRemoveConfirmation(null);
+      setData(await api<DashboardData>('/api/dashboard'));
+      setNotice('MONITOR REMOVED');
+    } catch (error) {
+      setRemoveConfirmation(null);
+      setNotice(error instanceof Error ? error.message.toUpperCase() : 'MONITOR REMOVAL FAILED');
+    }
   }
 
   function toggleSimulation() {
@@ -247,45 +394,111 @@ export default function Dashboard() {
     window.localStorage.setItem('bel-cybernoc-columns', String(value));
   }
 
-  return <main className="screen" onPointerDown={() => alertAudio.unlock()}>
+  function setNetworkIpMask(monitorId: string, masked: boolean) {
+    setMaskedNetworkLines((current) => {
+      const next = { ...current, [monitorId]: masked };
+      window.localStorage.setItem('bel-cybernoc-mask-network-lines', JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function chooseDisplayTheme(value: DisplayTheme) {
+    setDisplayTheme(value);
+    window.localStorage.setItem('bel-cybernoc-theme', value);
+  }
+
+  function toggleModernColorMode() {
+    const next = modernColorMode === 'light' ? 'dark' : 'light';
+    setModernColorMode(next);
+    window.localStorage.setItem('bel-cybernoc-modern-mode', next);
+  }
+
+  return <main className={`screen theme-${displayTheme} ${displayTheme === 'modern' ? `modern-${modernColorMode}` : ''}`} onPointerDown={() => { alertAudio.unlock(); void bootAudioRef.current?.play().catch(() => undefined); void backendOfflineAudioRef.current?.play().catch(() => undefined); }}>
     <div className="scene-grid" aria-hidden="true" /><div className="scene-scan" aria-hidden="true" />
+    {showBootSequence && <div className="boot-sequence" role="status" aria-live="polite">
+      <audio ref={bootAudioRef} src={bootAudioSource} preload="auto" />
+      <div className="boot-stars" aria-hidden="true" />
+      <div className="boot-data-stream boot-data-stream-left" aria-hidden="true">NODE_01 // AUTH OK<br />GATEWAY // SECURE<br />PACKET FLOW // ACTIVE<br />ENCRYPTION // AES-256</div>
+      <div className="boot-data-stream boot-data-stream-right" aria-hidden="true">BEL-NOC / 127.0.0.1<br />TELEMETRY // ONLINE<br />UPLINK // VERIFIED<br />THREAT GRID // READY</div>
+      <div className="boot-radar" aria-hidden="true"><i /><i /><i /><i /></div>
+      <div className="boot-core">
+        <div className="boot-logo-frame"><span /><img src="/Bharat_Electronics_logo.png" alt="Bharat Electronics Limited" /><span /></div>
+        <div className="boot-kicker">BHARAT ELECTRONICS // SECURE NOC</div>
+        <div className="boot-title">IS&amp;MS <span>NETWORK OPERATIONS</span></div>
+        <div className="boot-orbit" aria-hidden="true"><i /><i /><i /></div>
+        <div className="boot-status">{bootSequence[bootStep]}</div>
+        <div className="boot-detail">AUTHENTICATING NETWORK OPERATIONS ENVIRONMENT</div>
+        <div className="boot-progress"><span style={{ width: `${Math.round(bootProgress * 100)}%` }} /></div>
+        <div className="boot-counter">SYSTEM STARTUP <b>{String(Math.round(bootProgress * 100)).padStart(3, '0')}%</b></div>
+      </div>
+    </div>}
+    {!backend && !showBootSequence && <div className="backend-offline-overlay" role="alert" aria-live="assertive">
+      <audio ref={backendOfflineAudioRef} src="/BACKEND-OFFLINE.mp3" preload="auto" />
+      <div className="backend-offline-grid" aria-hidden="true" />
+      <div className="backend-offline-core">
+        <div className="backend-offline-icon"><WifiOff size={72} /></div>
+        <span className="backend-offline-kicker">/// CRITICAL INFRASTRUCTURE ALERT ///</span>
+        <strong>BACKEND OFFLINE</strong>
+        <span className="backend-offline-message">LOCAL TELEMETRY ENGINE IS NOT RESPONDING</span>
+        <div className="backend-offline-status"><i /> ATTEMPTING SECURE RECONNECTION <b>·</b> AUTO RETRY ACTIVE</div>
+        <div className="backend-offline-loader"><span /></div>
+        <span className="backend-offline-hint">CHECK FASTAPI SERVICE / PORT 8000 / LOCAL NETWORK</span>
+      </div>
+    </div>}
     {audioAlert && <div className={`audio-alert-overlay ${audioAlert.kind === 'recovered' ? 'restored' : 'warning'}`} role="status" aria-live="assertive">
       <span className="audio-alert-kicker">{audioAlert.kind === 'recovered' ? '/// SYSTEM STATUS UPDATE' : '/// CRITICAL NETWORK ALERT'}</span>
       <strong>{audioAlert.kind === 'recovered' ? 'SERVER RESTORED' : 'WARNING // SERVER DOWN'}</strong>
       <span className="audio-alert-target">{audioAlert.monitorName}</span>
       <span className="audio-alert-signal">{audioAlert.kind === 'recovered' ? 'LINK STABLE · TELEMETRY RESUMED' : 'LINK FAILURE · INVESTIGATION REQUIRED'}</span>
     </div>}
+    <audio ref={accessGrantedAudioRef} src="/Access-Granted-Futuristic-Alert.mp3" preload="auto" />
+    <audio ref={accessDeniedAudioRef} src="/Access-Denied-Futuristic-Alert.mp3" preload="auto" />
+    <audio ref={securityWarningAudioRef} src="/SECURITY-WARNING-Futuristic-Alert.mp3" preload="auto" />
+    {securityWarning && <div className="security-warning-overlay" role="alert" aria-live="assertive">
+      <div className="security-warning-grid" aria-hidden="true" />
+      <div className="security-warning-core">
+        <div className="security-warning-symbol"><LockKeyhole size={68} /></div>
+        <span className="security-warning-kicker">/// SECURITY PROTOCOL TRIGGERED ///</span>
+        <strong>ACCESS BLOCKED</strong>
+        <span className="security-warning-message">MULTIPLE INVALID ADMIN AUTHENTICATION ATTEMPTS</span>
+        <div className="security-warning-status"><i /> SECURITY WARNING <b>·</b> ATTEMPTS DETECTED: {failedLoginAttempts}</div>
+        <span className="security-warning-hint">VERIFY CREDENTIALS BEFORE RETRYING</span>
+        <button type="button" className="security-warning-dismiss" onClick={() => setSecurityWarning(false)}>ACKNOWLEDGE WARNING <ChevronRight size={15} /></button>
+      </div>
+    </div>}
     <header className="topbar">
       <div className="brand"><img className="brand-logo" src="/bel.ico" alt="BEL" /><div><div className="brand-name">BEL <span>IS&MS Network Operations Status</span></div><div className="brand-sub">BHARAT ELECTRONICS LIMITED <i>///</i> KOTDWARA</div></div><Network className="brand-end-icon" size={21} strokeWidth={1.8} aria-hidden="true" /></div>
       <div className="top-center"><span className={`live-pip ${backend ? 'is-live' : ''}`} />{backend ? 'TELEMETRY LINK ACTIVE' : 'BACKEND DISCONNECTED'}<b>·</b><span>LOCAL / LOOPBACK</span></div>
-      <div className="top-actions"><div className="clock"><strong>{clock.toLocaleTimeString([], { hour12: false })}</strong><span>{clock.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}</span></div><button className="icon-button" title="Enter full screen" onClick={() => document.documentElement.requestFullscreen?.()}><Maximize size={18} /></button><button className="icon-button" title="Monitor configuration" onClick={() => setDrawer(true)}><Settings2 size={19} /></button></div>
+      <div className="top-actions"><div className="clock"><strong>{clock.toLocaleTimeString([], { hour12: false })}</strong><span>{clock.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}</span></div>{displayTheme === 'modern' && <button className="icon-button color-mode-button is-modern-mode" title={`Switch to ${modernColorMode === 'light' ? 'dark' : 'light'} mode`} aria-label={`Switch to ${modernColorMode === 'light' ? 'dark' : 'light'} mode`} onClick={toggleModernColorMode}>{modernColorMode === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button>}<button className="icon-button" title="Enter full screen" onClick={() => document.documentElement.requestFullscreen?.()}><Maximize size={18} /></button><button className="icon-button" title="Monitor configuration" onClick={() => setDrawer(true)}><Settings2 size={19} /></button></div>
     </header>
 
     {(sim || currentProblem) && <div className={`alert-ribbon ${sim ? 'simulated' : ''}`}><AlertTriangle size={19} /><strong>{sim ? 'SIMULATED INCIDENT' : 'NETWORK INCIDENT'}</strong><span>{sim ? 'PREVIEW ONLY — SIMULATED LINE FAILURE' : currentProblem ? `${currentProblem.config.name} — ${statusLabels[currentProblem.status] || currentProblem.status.toUpperCase()}${problemMonitors.length > 1 ? ` (+${problemMonitors.length - 1})` : ''}` : ''}</span><span className="ribbon-time">{sim ? 'NOT LIVE' : currentProblem?.last_check ? stamp(currentProblem.last_check) : 'INVESTIGATING'}</span></div>}
 
     <section className="summary-strip">
-      <Metric icon={<Radio />} label="MONITORS ACTIVE" value={`${activeCount.toString().padStart(2, '0')} / ${data.monitors.length.toString().padStart(2, '0')}`} tone="cyan" /><Metric icon={<Activity />} label="NETWORK STATE" value={problemMonitors.length ? 'ATTENTION' : backend ? 'NOMINAL' : 'NO LINK'} tone={problemMonitors.length ? 'red' : backend ? 'green' : 'amber'} /><Metric icon={<ShieldCheck />} label="LIVE INCIDENTS" value={String(problemMonitors.length).padStart(2, '0')} tone={problemMonitors.length ? 'red' : 'green'} /><Metric icon={<Gauge />} label="PROBE ENGINE" value={backend ? 'RUNNING' : 'OFFLINE'} tone={backend ? 'green' : 'red'} /><div className="summary-right local-time-display"><span className="micro-label">LOCAL SYSTEM TIME <i>IST</i></span><strong>{clock.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</strong></div>
-    </section>
+      <Metric icon={<Radio />} label="SERVER ACTIVE" value={`${activeCount.toString().padStart(2, '0')} / ${data.monitors.length.toString().padStart(2, '0')}`} tone="cyan" /><Metric icon={<Activity />} label="NETWORK STATE" value={problemMonitors.length ? 'ATTENTION' : backend ? 'NOMINAL' : 'NO LINK'} tone={problemMonitors.length ? 'red' : backend ? 'green' : 'amber'} /><Metric icon={<ShieldCheck />} label="LIVE INCIDENTS" value={String(problemMonitors.length).padStart(2, '0')} tone={problemMonitors.length ? 'red' : 'green'} /><Metric icon={<Gauge />} label="PROBE ENGINE" value={backend ? 'RUNNING' : 'OFFLINE'} tone={backend ? 'green' : 'red'} /><div className="summary-right local-time-display"><span className="micro-label">LOCAL SYSTEM TIME <i>IST</i></span><strong>{clock.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</strong></div>
+      </section>
 
     {sim && <div className="simulation-banner"><CircleHelp size={15} /> SIMULATION PREVIEW ACTIVE — not live telemetry. Clear this preview to return to measured data.<button onClick={() => setSim(false)}>EXIT PREVIEW <X size={13} /></button></div>}
 
     <section className="section-heading"><div><span className="section-index">01</span><h1>LINE STATUS</h1><span className="section-caption">LIVE REACHABILITY <i>·</i> ROUTE-AWARE PROBES</span></div><div className="section-tools"><span className="refresh-mark"><span /> PROBE WINDOW 20 S</span></div></section>
 
-    {data.monitors.length === 0 ? <div className="empty-state"><Router size={29} /><strong>NO MONITORS CONFIGURED</strong><span>Open monitor configuration to add your first network line.</span><button onClick={() => setDrawer(true)}>OPEN CONFIGURATION <ChevronRight size={14} /></button></div> : <section className="monitor-grid" data-columns={cardsPerRow}>{data.monitors.map((monitor, index) => <MonitorCard key={monitor.config.id} monitor={monitor} index={index} simulated={sim} onEdit={() => { setEditing(monitor.config); setDrawer(true); }} />)}</section>}
+    {data.monitors.length === 0 ? <div className="empty-state"><Router size={29} /><strong>NO MONITORS CONFIGURED</strong><span>Open monitor configuration to add your first network line.</span><button onClick={() => setDrawer(true)}>OPEN CONFIGURATION <ChevronRight size={14} /></button></div> : <section className="monitor-grid" data-columns={cardsPerRow}>{data.monitors.map((monitor, index) => <MonitorCard key={monitor.config.id} monitor={monitor} index={index} simulated={sim} maskNetworkIps={maskedNetworkLines[monitor.config.id] === true} onEdit={() => { setEditing(monitor.config); setDrawer(true); }} />)}</section>}
 
-    <section className="lower-grid"><div className="panel events-panel"><PanelTitle index="02" title="INCIDENT TIMELINE" right={<span className="micro-live"><span /> LAST OUTAGES</span>} />{incidentEvents.length ? <div className="event-list">{incidentEvents.map((event) => {
+    <section className="lower-grid"><div className="panel events-panel"><PanelTitle index="02" title="INCIDENT TIMELINE" right={<span className="micro-live"><span /> LAST OUTAGES</span>} />{incidentEvents.length ? <div className="event-list"><div className="event-header"><span /> <span>MONITOR / LINE</span><span>STATE</span><span>DATE</span><span>DOWN TIME</span><span>UP TIME</span><span>DURATION</span></div>{incidentEvents.map((event) => {
       const currentDown = data.monitors.some((item) => item.config.id === event.monitor_id && item.config.enabled && ['down', 'gateway_down', 'upstream_down', 'application_down'].includes(item.status));
       const start = event.occurred_at;
       const end = event.resolved_at;
       const ongoing = !end && currentDown;
+      const durationMs = end || ongoing ? new Date(ongoing ? clock : end!).getTime() - new Date(start).getTime() : null;
       const duration = end || ongoing
-        ? elapsed(new Date(ongoing ? clock : end!).getTime() - new Date(start).getTime())
+        ? elapsed(durationMs!)
         : 'DURATION UNKNOWN';
       const isRecovered = Boolean(end);
       const isHistorical = !ongoing && !isRecovered;
       const stateLabel = isRecovered ? 'RESTORED' : ongoing ? 'STILL DOWN' : 'HISTORICAL';
-      const timeRange = `DOWN ${stamp(start)}  ·  ${duration}  ·  ${isRecovered ? `RECOVERED ${stamp(end)}` : ongoing ? 'STILL DOWN' : 'RECOVERY UNKNOWN'}`;
-      return <div className="event-row" key={event.id}><div className={`event-mark ${isRecovered ? 'recovered' : isHistorical ? 'historical' : 'down'}`} /><strong>{event.monitor_name}</strong><span className={isRecovered ? 'event-up' : isHistorical ? 'event-historical' : 'event-down'}>{stateLabel}</span><span className="event-detail" title={timeRange}>{timeRange}</span></div>;
+      const durationTone = durationMs === null ? 'event-historical' : durationMs < 15 * 60 * 1000 ? 'event-duration-short' : 'event-duration-long';
+      const timeRange = `DOWN ${incidentStamp(start)} · ${isRecovered ? `UP ${incidentStamp(end)}` : ongoing ? 'STILL DOWN' : 'UP UNKNOWN'} · ${duration}`;
+      return <div className={`event-row ${isRecovered ? 'is-recovered' : ongoing ? 'is-ongoing' : 'is-historical'}`} key={event.id}><div className={`event-mark ${isRecovered ? 'recovered' : isHistorical ? 'historical' : 'down'}`} /><strong>{event.monitor_name}</strong><span className={isRecovered ? 'event-up' : isHistorical ? 'event-historical' : 'event-down'}>{stateLabel}</span><span className="event-date">{incidentDate(start)}</span><span className="event-down" title={`Down time: ${incidentStamp(start)}`}>{incidentStamp(start)}</span><span className={isRecovered ? 'event-up' : 'event-historical'} title={isRecovered ? `Up time: ${incidentStamp(end)}` : 'Up time unavailable'}>{isRecovered ? incidentStamp(end) : ongoing ? '--:--:--' : 'UNKNOWN'}</span><span className={`event-duration ${durationTone}`} title={timeRange}>{duration}</span></div>;
     })}</div> : <div className="no-events"><Check size={15} /> NO RECENT INCIDENTS <span>Events appear after verified state transitions.</span></div>}</div>
       <div className="panel integrity-panel"><PanelTitle index="03" title="NODE INTEGRITY" /><div className="integrity-content"><div className="integrity-status"><div className={`integrity-ring ${backend ? 'ok' : 'bad'}`}><ShieldCheck size={23} /></div><div><strong>{backend ? 'LOCAL ENGINE READY' : 'API UNAVAILABLE'}</strong><span>{backend ? 'FASTAPI · SQLITE · WEBSOCKET' : 'WAITING FOR LOCAL BACKEND'}</span></div></div><div className="host-resources"><ResourceMeter label="CPU" value={data.system?.cpu_percent == null ? 'N/A' : `${data.system.cpu_percent.toFixed(0)}%`} percent={data.system?.cpu_percent ?? null} /><ResourceMeter label="RAM" value={bytesUsedTotal(data.system?.ram_used_bytes, data.system?.ram_total_bytes)} percent={data.system?.ram_percent ?? null} /><ResourceMeter label="STORAGE" value={bytesUsedTotal(data.system?.storage_used_bytes, data.system?.storage_total_bytes)} percent={data.system?.storage_percent ?? null} /></div></div></div>
     </section>
@@ -300,7 +513,7 @@ export default function Dashboard() {
             <button className="icon-button" onClick={() => { setDrawer(false); setEditing(null); }} aria-label="Close"><X size={19} /></button>
           </div>
         </div>
-        <div className="display-settings">
+        {adminToken && <div className="display-settings">
           <div className="form-section-title">WALL DISPLAY</div>
           <div className="display-setting-row">
             <span>MONITORS PER ROW</span>
@@ -308,9 +521,17 @@ export default function Dashboard() {
               {[2, 3, 4].map((count) => <button key={count} type="button" className={cardsPerRow === count ? 'selected' : ''} aria-pressed={cardsPerRow === count} onClick={() => chooseCardsPerRow(count)}>{count}</button>)}
             </div>
           </div>
+          <div className="display-setting-row">
+            <span>VISUAL THEME</span>
+            <div className="display-segmented theme-segmented" role="group" aria-label="Visual theme">
+              <button type="button" className={displayTheme === 'cybertech' ? 'selected' : ''} aria-pressed={displayTheme === 'cybertech'} onClick={() => chooseDisplayTheme('cybertech')}>CYBERTECH</button>
+              <button type="button" className={displayTheme === 'classic' ? 'selected' : ''} aria-pressed={displayTheme === 'classic'} onClick={() => chooseDisplayTheme('classic')}>CLASSIC</button>
+              <button type="button" className={displayTheme === 'modern' ? 'selected' : ''} aria-pressed={displayTheme === 'modern'} onClick={() => chooseDisplayTheme('modern')}>MODERN</button>
+            </div>
+          </div>
           <button type="button" className={`simulation-toggle drawer-simulation ${sim ? 'selected' : ''}`} onClick={() => { toggleSimulation(); setDrawer(false); }}><Activity size={14} /> {sim ? 'END SIMULATION' : 'SIMULATION PREVIEW'}</button>
           <div className="export-settings"><div className="form-section-title">INCIDENT LOG EXPORT <span className="optional">IST · 12-HOUR FORMAT</span></div><div className="export-dates"><label>FROM<input type="date" value={exportDates.start} onChange={(event) => setExportDates((current) => ({ ...current, start: event.target.value }))} /></label><label>TO<input type="date" value={exportDates.end} onChange={(event) => setExportDates((current) => ({ ...current, end: event.target.value }))} /></label></div><button type="button" className="add-monitor export-button" onClick={() => void exportIncidents()}><Download size={14} /> EXPORT EXCEL CSV</button></div>
-        </div>
+        </div>}
         {!adminToken ? <form className="login-box" onSubmit={signIn}>
           <LockKeyhole size={22} /><h3>ADMIN AUTHENTICATION</h3>
           <p>Configuration changes require the local admin password from the backend data folder.</p>
@@ -335,9 +556,21 @@ export default function Dashboard() {
               </div>
             </div>)}
           </div>
-          {editing && <MonitorForm key={editing.id} value={editing} files={audioFiles} onChange={setEditing} onSubmit={saveMonitor} onRemove={() => void removeMonitor(editing.id)} isNew={!data.monitors.some((item) => item.config.id === editing.id)} onTestAudio={(filename) => void alertAudio.test(filename, adminToken).catch((error) => setNotice(error.message.toUpperCase()))} />}
+          {editing && <MonitorForm key={editing.id} value={editing} files={audioFiles} maskNetworkIps={maskedNetworkLines[editing.id] === true} onMaskNetworkIpsChange={(masked) => setNetworkIpMask(editing.id, masked)} onChange={setEditing} onSubmit={saveMonitor} onRemove={() => removeMonitor(editing.id, editing.name)} isNew={!data.monitors.some((item) => item.config.id === editing.id)} onTestAudio={(filename) => void alertAudio.test(filename, adminToken).catch((error) => setNotice(error.message.toUpperCase()))} />}
         </>}
       </aside>
+    </div>}
+    {removeConfirmation && <div className="confirmation-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRemoveConfirmation(null); }}>
+      <div className="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="remove-monitor-title" aria-describedby="remove-monitor-message">
+        <div className="confirmation-icon"><AlertTriangle size={25} /></div>
+        <span className="confirmation-kicker">/// DESTRUCTIVE ACTION ///</span>
+        <h2 id="remove-monitor-title">REMOVE MONITOR?</h2>
+        <p id="remove-monitor-message">Remove <strong>{removeConfirmation.name}</strong> and stop its probe?</p>
+        <div className="confirmation-actions">
+          <button type="button" className="confirmation-cancel" onClick={() => setRemoveConfirmation(null)}>CANCEL</button>
+          <button type="button" className="confirmation-remove" onClick={() => void confirmRemoveMonitor()}>REMOVE MONITOR <X size={14} /></button>
+        </div>
+      </div>
     </div>}
     {notice && <div className="toast-message">{notice}</div>}
   </main>;
@@ -353,7 +586,7 @@ function ResourceMeter({ label, value, percent }: { label: string; value: string
   </div>;
 }
 
-function MonitorCard({ monitor, index, simulated, onEdit }: { monitor: MonitorView; index: number; simulated: boolean; onEdit: () => void }) {
+function MonitorCard({ monitor, index, simulated, maskNetworkIps, onEdit }: { monitor: MonitorView; index: number; simulated: boolean; maskNetworkIps: boolean; onEdit: () => void }) {
   const { config } = monitor;
   const previewStatus = simulated && index === 0 ? 'down' : simulated && index === 1 ? 'degraded' : monitor.status;
   const stateClass = simulated && index < 2 ? previewStatus : !config.enabled ? 'disabled' : previewStatus;
@@ -362,8 +595,8 @@ function MonitorCard({ monitor, index, simulated, onEdit }: { monitor: MonitorVi
   const displayLoss = displayUptime === null ? null : 100 - displayUptime;
   const history = monitor.history.slice(-32);
   return <article className={`monitor-card state-${stateClass}`}>
-    <div className="card-accent" />    <div className="card-head"><div className="card-name"><span className="line-number">LN-{String(index + 1).padStart(2, '0')}</span><div><h2>{config.name}</h2><span className="card-type">{(config.custom_type || config.type.replace('_', ' ')).toUpperCase()}</span></div></div><div className={`state-badge ${stateClass}`}><span />{statusLabels[stateClass] || stateClass.toUpperCase()}</div><button className="card-settings" onClick={onEdit} title="Edit monitor"><Settings2 size={16} /></button></div>
-    <div className="endpoint-row"><div><span>GATEWAY <Signal className={`network-icon ${endpointState(monitor.gateway_reachable)}`} size={13} /></span><strong>{config.gateway_ip || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.gateway_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.gateway_reachable)}</small></div><div className="endpoint-link"><span /></div><div><span>REMOTE TARGET <Signal className={`network-icon ${endpointState(monitor.target_reachable)}`} size={13} /></span><strong>{config.target || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.target_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.target_reachable)}</small></div></div>
+    <div className="card-accent" />    <div className="card-head"><div className="card-name"><span className="line-number">LN-{String(index + 1).padStart(2, '0')}</span><div className="card-title-group"><div className="card-title-row"><h2>{config.name}</h2>{config.active_nodes_visible && <div className={`card-client-count ${monitor.status}`} title={`Active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`} aria-label={`Active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`}><i className="active-node-pulse" /><Monitor size={15} /><strong>{monitor.connected_clients.count ?? '--'}</strong></div>}</div><span className="card-type">{(config.custom_type || config.type.replace('_', ' ')).toUpperCase()}</span></div></div><div className={`state-badge ${stateClass}`}><span />{statusLabels[stateClass] || stateClass.toUpperCase()}</div><button className="card-settings" onClick={onEdit} title="Edit monitor"><Settings2 size={16} /></button></div>
+    <div className="endpoint-row"><div><span>GATEWAY <Signal className={`network-icon ${endpointState(monitor.gateway_reachable)}`} size={13} /></span><strong>{maskEndpoint(config.gateway_ip, maskNetworkIps) || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.gateway_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.gateway_reachable)}</small></div><div className="endpoint-link"><span /></div><div><span>REMOTE TARGET <Signal className={`network-icon ${endpointState(monitor.target_reachable)}`} size={13} /></span><strong>{maskEndpoint(config.target, maskNetworkIps) || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.target_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.target_reachable)}</small></div></div>
     <div className="card-metrics"><div className={metricTone(monitor.latency_ms, config.latency_warning_ms)}><span><Signal size={13} /> RTT</span><strong>{simulated && index === 0 ? '---' : latency(monitor.latency_ms)}</strong></div><div className={lossTone(displayLoss)}><span>{lineDown ? <WifiOff className="line-down-icon" size={13} /> : <Wifi size={13} />} LOSS</span><strong>{simulated && index === 0 ? '---' : displayLoss === null ? '---' : `${displayLoss.toFixed(1)}%`}</strong></div><div className={uptimeTone(displayUptime)}><span><Clock3 size={13} /> DAILY UPTIME</span><strong>{displayUptime === null ? '---' : `${displayUptime.toFixed(1)}%`}</strong></div></div>
     <div className="history-chart"><div className="chart-title"><span>LATENCY / HISTORY</span><span>{monitor.last_check ? stamp(monitor.last_check) : 'AWAITING DATA'}</span></div><MiniChart samples={history} status={previewStatus} /></div>
     <div className="throughput"><div><span><i className="rx-arrow">↓</i> RX / IN</span><strong>{rate(monitor.rx_bps)}</strong></div><div><span><i className="tx-arrow">↑</i> TX / OUT</span><strong>{rate(monitor.tx_bps)}</strong></div><div className="route-note"><Router size={13} /><span>{monitor.route_strategy === 'source-address' ? `SRC ${config.source_ip}` : 'WINDOWS DEFAULT ROUTE'}</span></div></div>
@@ -379,11 +612,42 @@ function MiniChart({ samples, status }: { samples: Sample[]; status: string }) {
   return <svg viewBox="0 0 100 30" preserveAspectRatio="none" className={`chart-svg ${status}`} aria-label="Historical latency chart"><line x1="0" x2="100" y1="26" y2="26" className="chart-axis" /><polyline points={`0,28 ${points} 100,28`} className="chart-area" /><polyline points={points} className="chart-line" /></svg>;
 }
 
-function MonitorForm({ value, files, onChange, onSubmit, onRemove, isNew, onTestAudio }: { value: MonitorConfig; files: string[]; onChange: (value: MonitorConfig) => void; onSubmit: (event: React.FormEvent) => void; onRemove: () => void; isNew: boolean; onTestAudio: (file: string) => void }) {
+function MonitorForm({ value, files, maskNetworkIps, onMaskNetworkIpsChange, onChange, onSubmit, onRemove, isNew, onTestAudio }: { value: MonitorConfig; files: string[]; maskNetworkIps: boolean; onMaskNetworkIpsChange: (masked: boolean) => void; onChange: (value: MonitorConfig) => void; onSubmit: (event: React.FormEvent) => void; onRemove: () => void; isNew: boolean; onTestAudio: (file: string) => void }) {
   const update = <K extends keyof MonitorConfig>(key: K, next: MonitorConfig[K]) => onChange({ ...value, [key]: next });
   const updateSnmp = (key: keyof MonitorConfig['snmp'], next: MonitorConfig['snmp'][keyof MonitorConfig['snmp']]) => onChange({ ...value, snmp: { ...value.snmp, [key]: next } });
-  return <form className="monitor-form" onSubmit={onSubmit}><div className="form-section-title">LINE PARAMETERS</div><label>DISPLAY NAME<input value={value.name} onChange={(event) => update('name', event.target.value)} required maxLength={80} /></label><div className="form-two"><label>MONITOR TYPE<select value={value.type} onChange={(event) => update('type', event.target.value as MonitorConfig['type'])}><option value="sap_intranet">SAP / INTRANET</option><option value="internet">INTERNET LINE</option><option value="server">SERVER</option><option value="other">OTHER</option></select></label><label className="toggle-row">ENABLED<input type="checkbox" checked={value.enabled} onChange={(event) => update('enabled', event.target.checked)} /><span /></label></div>{value.type === 'other' && <label>CUSTOM LINE TYPE<input value={value.custom_type || ''} placeholder="VPN / MPLS / CCTV" onChange={(event) => update('custom_type', event.target.value || null)} required maxLength={40} /></label>}<label>GATEWAY IP<input value={value.gateway_ip} placeholder="192.0.2.1" onChange={(event) => update('gateway_ip', event.target.value)} required /></label><label>REMOTE TARGET<input value={value.target} placeholder="198.51.100.10 or service.example" onChange={(event) => update('target', event.target.value)} required /></label><div className="form-two"><label>INTERVAL (SEC)<input type="number" min="2" max="300" value={value.interval_seconds} onChange={(event) => update('interval_seconds', Number(event.target.value))} /></label><label>TIMEOUT (MS)<input type="number" min="100" max="15000" value={value.timeout_ms} onChange={(event) => update('timeout_ms', Number(event.target.value))} /></label></div><label>SOURCE INTERFACE IP <span className="optional">OPTIONAL</span><input value={value.source_ip || ''} placeholder="Windows NIC IPv4 address" onChange={(event) => update('source_ip', event.target.value || null)} /></label><div className="form-two"><label>DOWN AFTER N FAILURES<input type="number" min="1" max="20" value={value.failure_threshold} onChange={(event) => update('failure_threshold', Number(event.target.value))} /></label><label>RECOVER AFTER N OK<input type="number" min="1" max="20" value={value.recovery_threshold} onChange={(event) => update('recovery_threshold', Number(event.target.value))} /></label></div><div className="form-two"><label>TCP PORT <span className="optional">OPTIONAL</span><input type="number" min="1" max="65535" value={value.tcp_port || ''} onChange={(event) => update('tcp_port', event.target.value ? Number(event.target.value) : null)} /></label><label>HTTP(S) URL <span className="optional">OPTIONAL</span><input value={value.http_url || ''} placeholder="https://service.local/health" onChange={(event) => update('http_url', event.target.value || null)} /></label></div>
-    <div className="form-section-title">THROUGHPUT COLLECTION</div><label className="toggle-row">RX / TX SPEED<input type="checkbox" checked={value.throughput_enabled} onChange={(event) => update('throughput_enabled', event.target.checked)} /><span /></label><div className="form-hint">Uses SNMP first, then local Windows adapter fallback.</div><div className="form-section-title">SNMP INTERFACE COUNTERS</div><label className="toggle-row">SNMP COUNTERS<input type="checkbox" checked={value.snmp.enabled} onChange={(event) => updateSnmp('enabled', event.target.checked)} /><span /></label>{value.snmp.enabled && <><label>SNMP HOST<input value={value.snmp.host || ''} onChange={(event) => updateSnmp('host', event.target.value || null)} required /></label><div className="form-two"><label>READ-ONLY COMMUNITY<input type="password" value={value.snmp.community || ''} onChange={(event) => updateSnmp('community', event.target.value || null)} required /></label><label>IF INDEX<input type="number" min="1" value={value.snmp.interface_index || ''} onChange={(event) => updateSnmp('interface_index', event.target.value ? Number(event.target.value) : null)} required /></label></div><label>COUNTER WIDTH<select value={value.snmp.counter_bits} onChange={(event) => updateSnmp('counter_bits', Number(event.target.value) as 32 | 64)}><option value="64">64-BIT (IF-MIB HIGH CAPACITY)</option><option value="32">32-BIT (IF-MIB)</option></select></label></>}
+  return <form className="monitor-form" onSubmit={onSubmit}>
+    <div className="form-section-title">LINE PARAMETERS</div>
+    <label>DISPLAY NAME<input value={value.name} onChange={(event) => update('name', event.target.value)} required maxLength={80} /></label>
+    <div className="form-two">
+      <label>MONITOR TYPE<select value={value.type} onChange={(event) => update('type', event.target.value as MonitorConfig['type'])}><option value="sap_intranet">SAP / INTRANET</option><option value="internet">INTERNET LINE</option><option value="server">SERVER</option><option value="other">OTHER</option></select></label>
+      <label className="toggle-row">ENABLED<input type="checkbox" checked={value.enabled} onChange={(event) => update('enabled', event.target.checked)} /><span /></label>
+    </div>
+    {value.type === 'other' && <label>CUSTOM LINE TYPE<input value={value.custom_type || ''} placeholder="VPN / MPLS / CCTV" onChange={(event) => update('custom_type', event.target.value || null)} required maxLength={40} /></label>}
+    <label>GATEWAY IP<input value={value.gateway_ip} placeholder="192.0.2.1" onChange={(event) => update('gateway_ip', event.target.value)} required /></label>
+    <label>REMOTE TARGET<input value={value.target} placeholder="198.51.100.10 or service.example" onChange={(event) => update('target', event.target.value)} required /></label>
+    <label className="toggle-row">MASK GATEWAY / TARGET IP ON WALL DISPLAY<input type="checkbox" checked={maskNetworkIps} onChange={(event) => onMaskNetworkIpsChange(event.target.checked)} /><span /></label>
+    <div className="form-two">
+      <label>INTERVAL (SEC)<input type="number" min="2" max="300" value={value.interval_seconds} onChange={(event) => update('interval_seconds', Number(event.target.value))} /></label>
+      <label>TIMEOUT (MS)<input type="number" min="100" max="15000" value={value.timeout_ms} onChange={(event) => update('timeout_ms', Number(event.target.value))} /></label>
+    </div>
+    <label>SOURCE INTERFACE IP <span className="optional">OPTIONAL</span><input value={value.source_ip || ''} placeholder="Windows NIC IPv4 address" onChange={(event) => update('source_ip', event.target.value || null)} /></label>
+    <div className="form-two">
+      <label>DOWN AFTER N FAILURES<input type="number" min="1" max="20" value={value.failure_threshold} onChange={(event) => update('failure_threshold', Number(event.target.value))} /></label>
+      <label>RECOVER AFTER N OK<input type="number" min="1" max="20" value={value.recovery_threshold} onChange={(event) => update('recovery_threshold', Number(event.target.value))} /></label>
+    </div>
+    <div className="form-two">
+      <label>TCP PORT <span className="optional">OPTIONAL</span><input type="number" min="1" max="65535" value={value.tcp_port || ''} onChange={(event) => update('tcp_port', event.target.value ? Number(event.target.value) : null)} /></label>
+      <label>HTTP(S) URL <span className="optional">OPTIONAL</span><input value={value.http_url || ''} placeholder="https://service.local/health" onChange={(event) => update('http_url', event.target.value || null)} /></label>
+    </div>
+    <div className="form-section-title">THROUGHPUT COLLECTION</div>
+    <label className="toggle-row">RX / TX SPEED<input type="checkbox" checked={value.throughput_enabled} onChange={(event) => update('throughput_enabled', event.target.checked)} /><span /></label>
+    <div className="form-hint">Uses SNMP first, then local Windows adapter fallback.</div>
+    <div className="form-section-title">ACTIVE NODE DISPLAY</div>
+    <label className="toggle-row">SHOW ACTIVE NODE COUNT<input type="checkbox" checked={value.active_nodes_visible} onChange={(event) => update('active_nodes_visible', event.target.checked)} /><span /></label>
+    <div className="form-hint">Shows the real-time observed PC/node count beside the line name.</div>
+    <div className="form-section-title">SNMP INTERFACE COUNTERS</div>
+    <label className="toggle-row">SNMP COUNTERS<input type="checkbox" checked={value.snmp.enabled} onChange={(event) => updateSnmp('enabled', event.target.checked)} /><span /></label>
+    {value.snmp.enabled && <><label>SNMP HOST<input value={value.snmp.host || ''} onChange={(event) => updateSnmp('host', event.target.value || null)} required /></label><div className="form-two"><label>READ-ONLY COMMUNITY<input type="password" value={value.snmp.community || ''} onChange={(event) => updateSnmp('community', event.target.value || null)} required /></label><label>IF INDEX<input type="number" min="1" value={value.snmp.interface_index || ''} onChange={(event) => updateSnmp('interface_index', event.target.value ? Number(event.target.value) : null)} required /></label></div><label>COUNTER WIDTH<select value={value.snmp.counter_bits} onChange={(event) => updateSnmp('counter_bits', Number(event.target.value) as 32 | 64)}><option value="64">64-BIT (IF-MIB HIGH CAPACITY)</option><option value="32">32-BIT (IF-MIB)</option></select></label></>}
     <div className="form-section-title">VOICE ALERT MAPPING <span className="optional">AUDIO FOLDER: C:\CyberNOC\audio</span></div><AudioSelect label="DOWN ALERT" value={value.audio_down} files={files} onChange={(next) => update('audio_down', next)} onTest={onTestAudio} /><AudioSelect label="RECOVERY ALERT" value={value.audio_recovered} files={files} onChange={(next) => update('audio_recovered', next)} onTest={onTestAudio} /><AudioSelect label="REPEAT ALERT AUDIO" value={value.audio_reminder} files={files} onChange={(next) => update('audio_reminder', next)} onTest={onTestAudio} /><label>REPEAT EVERY (MINUTES)<span className="optional">DEFAULT 30 · RANGE 1–1440</span><input type="number" min="1" max="1440" step="1" value={value.alert_repeat_minutes} onChange={(event) => update('alert_repeat_minutes', Number(event.target.value))} required /></label>
     <button className="save-button"><Check size={15} /> {isNew ? 'ADD MONITOR' : 'SAVE CHANGES'}</button>{!isNew && <button type="button" className="remove-button" onClick={onRemove}>REMOVE MONITOR</button>}</form>;
 }
