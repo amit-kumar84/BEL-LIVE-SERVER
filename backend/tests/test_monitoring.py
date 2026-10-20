@@ -1,10 +1,12 @@
 # BEL Cyber Network Operations Status — monitoring state and throughput tests.
+import asyncio
+
 import pytest
 
 from app.audio import safe_audio_file
 from app.database import HistoryStore
 from app.models import MonitorConfig
-from app.monitoring import bandwidth_delta, down_alert_due, parse_arp_entries, should_emit_down_reminder, update_state
+from app.monitoring import bandwidth_delta, down_alert_due, normalize_mac_address, parse_arp_entries, parse_bridge_fdb_mac, should_emit_down_reminder, snmp_connected_clients, update_state
 
 
 def config(**overrides):
@@ -43,6 +45,13 @@ def test_config_requires_complete_enabled_snmp_settings():
     assert configured.snmp.enabled
 
 
+def test_snmp_client_discovery_requires_read_only_credentials():
+    with pytest.raises(ValueError, match="SNMP client discovery requires host and read-only community"):
+        config(snmp={"client_discovery_enabled": True})
+    configured = config(snmp={"client_discovery_enabled": True, "host": "192.0.2.2", "community": "readOnly"})
+    assert configured.snmp.client_discovery_enabled
+
+
 def test_reminder_audio_uses_validated_audio_filename():
     configured = config(audio_reminder="repeat.wav")
     assert configured.audio_reminder == "repeat.wav"
@@ -50,6 +59,14 @@ def test_reminder_audio_uses_validated_audio_filename():
         config(audio_reminder="..\\outside.wav")
     with pytest.raises(ValueError):
         config(audio_reminder="repeat.ogg")
+
+
+def test_down_and_recovery_audio_default_when_missing_or_unset():
+    assert config().audio_down == "down-default-alert.mp3"
+    assert config().audio_recovered == "restored-default-alert.mp3"
+    configured = config(audio_down=None, audio_recovered=None)
+    assert configured.audio_down == "down-default-alert.mp3"
+    assert configured.audio_recovered == "restored-default-alert.mp3"
 
 
 def test_failure_and_recovery_threshold_transitions():
@@ -98,6 +115,43 @@ Interface: 192.168.1.5 --- 0x6
   invalid               xx-xx-xx-xx-xx-xx     dynamic
 """
     assert parse_arp_entries(output) == {"192.168.1.1", "192.168.1.25"}
+
+
+def test_snmp_mac_parsing_filters_invalid_and_non_learned_rows():
+    base_oid = "1.3.6.1.2.1.17.4.3.1.3"
+    learned_oid = f"{base_oid}.0.17.34.51.68.85"
+    mac = bytes.fromhex("001122334455")
+
+    assert normalize_mac_address(mac) == "00:11:22:33:44:55"
+    assert normalize_mac_address(bytes.fromhex("010000000001")) is None
+    assert normalize_mac_address(bytes(6)) is None
+    assert parse_bridge_fdb_mac(learned_oid, base_oid, 3) == "00:11:22:33:44:55"
+    assert parse_bridge_fdb_mac(learned_oid, base_oid, 5) is None
+    assert parse_bridge_fdb_mac(f"{base_oid}.999.17.34.51.68.85", base_oid, 3) is None
+
+
+def test_snmp_client_discovery_deduplicates_arp_and_bridge_rows(monkeypatch):
+    arp_base = "1.3.6.1.2.1.4.22.1.2"
+    physical_base = "1.3.6.1.2.1.4.35.1.4"
+    fdb_base = "1.3.6.1.2.1.17.4.3.1.3"
+    qbridge_base = "1.3.6.1.2.1.17.7.1.2.2.1.3"
+
+    async def walk_table(_engine, _auth, _target, base_oid, _timeout):
+        if base_oid in (arp_base, physical_base):
+            return [(f"{base_oid}.2.192.168.1.10", bytes.fromhex("001122334455"))]
+        if base_oid == fdb_base:
+            return [(f"{fdb_base}.0.17.34.51.68.85", 3)]
+        return [
+            (f"{qbridge_base}.100.0.17.34.51.68.86", 3),
+            (f"{qbridge_base}.100.0.17.34.51.68.87", 5),
+        ]
+
+    monkeypatch.setattr("app.monitoring._walk_snmp_table", walk_table)
+    monitor = config(snmp={"client_discovery_enabled": True, "host": "192.0.2.2", "community": "readOnly"})
+
+    result = asyncio.run(snmp_connected_clients(monitor))
+
+    assert result == {"count": 2, "source": "snmp", "endpoint": "192.0.2.2"}
 
 
 def test_history_returns_gateway_and_target_reachability(tmp_path):

@@ -5,6 +5,7 @@ import asyncio
 import csv
 import hmac
 import io
+import os
 import secrets
 import time
 from collections import deque
@@ -16,8 +17,9 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
-from .audio import list_audio_files, safe_audio_file
+from .audio import audio_upload_path, list_audio_files, safe_audio_file, validate_audio_duration
 from .config import AUDIO_DIR, CONFIG_PATH, DATA_DIR, DATABASE_PATH, ensure_admin_password, load_monitors, save_monitors
 from .database import HistoryStore
 from .models import AdminLogin, AudioTest, MonitorConfig, MonitorList
@@ -71,11 +73,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="BEL CyberNOC Local API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8000"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+MAX_AUDIO_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 def require_loopback(request: Request) -> None:
@@ -142,6 +146,35 @@ async def dashboard(request: Request):
 async def audio_files(request: Request):
     require_loopback(request)
     return {"files": list_audio_files(AUDIO_DIR)}
+
+
+@app.put("/api/admin/audio/{filename}")
+async def upload_audio(filename: str, request: Request, _: str = Depends(require_admin)):
+    try:
+        destination = audio_upload_path(AUDIO_DIR, filename)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > MAX_AUDIO_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Audio file exceeds the 20 MB upload limit")
+    if not content:
+        raise HTTPException(status_code=422, detail="Audio file is empty")
+    try:
+        validate_audio_duration(bytes(content), filename)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = AUDIO_DIR / f".upload-{secrets.token_hex(8)}.tmp"
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"file": filename}
 
 
 @app.get("/api/admin/incidents/export")
@@ -213,9 +246,20 @@ async def replace_monitors(payload: MonitorList, request: Request, _: str = Depe
     ids = [monitor.id for monitor in payload.monitors]
     if len(ids) != len(set(ids)):
         raise HTTPException(status_code=422, detail="Monitor IDs must be unique")
+    for monitor in payload.monitors:
+        for filename in (monitor.audio_down, monitor.audio_recovered, monitor.audio_reminder):
+            if not filename:
+                continue
+            try:
+                audio_path = safe_audio_file(AUDIO_DIR, filename)
+                validate_audio_duration(audio_path)
+            except (FileNotFoundError, ValueError) as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
     save_monitors(payload.monitors)
     await request.app.state.engine.reconfigure(payload.monitors)
-    return {"monitors": [item.model_dump(mode="json") for item in payload.monitors]}
+    result = [item.model_dump(mode="json") for item in payload.monitors]
+    await request.app.state.bus.publish({"type": "snapshot", "data": dashboard_snapshot(request.app)})
+    return {"monitors": result}
 
 
 @app.websocket("/api/ws")
@@ -224,7 +268,11 @@ async def websocket_feed(websocket: WebSocket):
     origin = websocket.headers.get("origin")
     origin_host = urlparse(origin).hostname if origin else None
     valid_host = host in ("127.0.0.1", "localhost", "::1")
-    valid_origin = origin in ("http://127.0.0.1:5173", "http://localhost:5173") if origin else valid_host
+    valid_origin = origin in (
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:8000",
+    ) if origin else valid_host
     if not valid_host or not valid_origin:
         await websocket.close(code=1008)
         return
@@ -241,3 +289,8 @@ async def websocket_feed(websocket: WebSocket):
         pass
     finally:
         bus.clients.discard(queue)
+
+
+WEB_ROOT = Path(os.getenv("CYBERNOC_WEB_DIR", str(Path(__file__).resolve().parents[2] / "dist"))).resolve()
+if (WEB_ROOT / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=WEB_ROOT, html=True), name="frontend")

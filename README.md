@@ -2,9 +2,10 @@
 
 Local network monitoring dashboard for Windows, built for operational visibility across gateways, remote targets, application endpoints, incidents, uptime, packet loss, and throughput.
 
-**Author:** [Amit Kumar](https://github.com/amit-kumar84)  
-**Repository:** [amit-kumar84/BEL-LIVE-SERVER](https://github.com/amit-kumar84)  
-**License:** MIT for the original source code; see [NOTICE](./NOTICE) for branding and third-party asset terms.
+- **Developer:** [Amit Kumar](https://github.com/amit-kumar84)
+- **Author:** [Amit Kumar](https://github.com/amit-kumar84)
+- **Repository:** [amit-kumar84/BEL-LIVE-SERVER](https://github.com/amit-kumar84)
+**License:** Dual licensing is available: MIT for the open-source codebase and a commercial option for enterprise or redistributed deployment terms. See [LICENSE](./LICENSE), [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md), and [NOTICE](./NOTICE).
 
 > **Important:** This project is designed for authorized local monitoring only. Configure only systems and networks that you own or are permitted to monitor.
 
@@ -134,7 +135,7 @@ The local fallback measures traffic through the monitoring PC, not total router/
 
 ## Incident alerts and export
 
-Place authorized MP3/WAV files in `C:\CyberNOC\audio`, map them in Monitor Configuration, and click the dashboard once to allow browser audio playback. Visual alerts work independently of audio.
+Place authorized MP3/WAV files in `C:\CyberNOC\audio` (open it from the Start Menu shortcut **BEL CyberNOC / Alert Audio Folder**), then map them to each line in Monitor Configuration. Visual alerts work independently of audio.
 
 The configuration drawer provides authenticated incident export by IST date range. CSV output includes incident ID, monitor, down time, recovery time, total downtime, and details, using Excel-friendly UTF-8 output and 12-hour IST timestamps.
 
@@ -165,13 +166,17 @@ npm run build
 
 ## License and ownership
 
-Original source code in this repository is licensed under the MIT License. See [LICENSE](./LICENSE).
+This project is delivered under a dual-license model:
+
+- MIT License for the original source code in this repository: [LICENSE](./LICENSE)
+- Commercial/enterprise licensing for redistribution, branding, service deployment, or proprietary integration: [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md)
 
 BEL names, marks, logos, and organization-specific materials are not granted under the MIT License. Third-party logos, fonts, icons, and service branding remain the property of their respective owners. See [NOTICE](./NOTICE).
 
 Copyright © 2026 Amit Kumar. This copyright notice covers the original source code authored for this repository and does not override any applicable employment, contract, government, customer, or intellectual-property agreement.
 
-## Author
+## Developer and author
 
-[Amit Kumar](https://github.com/amit-kumar84)  
-GitHub: <https://github.com/amit-kumar84>
+ - **Developer:** [Amit Kumar](https://github.com/amit-kumar84)
+ - **Author:** [Amit Kumar](https://github.com/amit-kumar84)
+ - **GitHub:** <https://github.com/amit-kumar84>

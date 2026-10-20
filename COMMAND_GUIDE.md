@@ -167,7 +167,7 @@ For Edge full-screen kiosk mode:
 .\start_kiosk.bat
 ```
 
-## 9. Production frontend build
+## 9. Production build and startup
 
 **Run in:** repository root
 
@@ -184,21 +184,19 @@ tsc -b
 vite build
 ```
 
-The generated files are written to `dist\`.
+The generated files are written to `dist\`. `start_dashboard.bat` builds the frontend and serves `dist\` on port `5173`; it does not use Vite's development server.
 
-Preview the production frontend locally:
+Start the production dashboard and backend:
 
 ```powershell
-npm run preview -- --host 127.0.0.1
+.\start_dashboard.bat
 ```
 
-The preview server normally uses port `4173`:
+The dashboard remains at <http://127.0.0.1:5173> and the API at <http://127.0.0.1:8000>.
 
-```text
-http://127.0.0.1:4173
-```
+For automatic startup with Windows and restart after process crashes, put `nssm.exe` in the repository root and run `install_services.bat` as Administrator once. It registers `BELCyberNOCBackend` and `BELCyberNOCFrontend` Windows services.
 
-The preview command does not replace the FastAPI backend. Keep the backend running separately on port `8000`.
+`stop_application.bat` stops only the backend. The frontend service remains running; stop it separately from Windows Services (`services.msc`) when needed.
 
 ## 10. Run backend tests
 

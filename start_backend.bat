@@ -29,7 +29,7 @@ if not exist "data" mkdir data
 if not exist "C:\CyberNOC\audio" mkdir "C:\CyberNOC\audio" 2>nul
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/health -TimeoutSec 1; if($r.StatusCode -eq 200 -and $r.Content.Contains('127.0.0.1')){exit 0} } catch {}; exit 1"
-if errorlevel 1 powershell -NoProfile -ExecutionPolicy Bypass -Command "$null = Start-Process -FilePath '%PY%' -ArgumentList '-m','uvicorn','app.main:app','--app-dir','backend','--host','127.0.0.1','--port','8000' -WorkingDirectory '%ROOT%' -RedirectStandardOutput '%BACKEND_LOG%' -RedirectStandardError '%BACKEND_ERROR_LOG%' -WindowStyle Minimized"
+if errorlevel 1 powershell -NoProfile -ExecutionPolicy Bypass -Command "$null = Start-Process -FilePath '%PY%' -ArgumentList '-m','uvicorn','app.main:app','--app-dir','backend','--host','127.0.0.1','--port','8000' -WorkingDirectory '%ROOT%' -RedirectStandardOutput '%BACKEND_LOG%' -RedirectStandardError '%BACKEND_ERROR_LOG%' -WindowStyle Hidden -ErrorAction Stop"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ready=$false; for($i=0;$i -lt 40;$i++){ try { $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/health -TimeoutSec 1; if($r.StatusCode -eq 200 -and $r.Content.Contains('127.0.0.1')){$ready=$true;break} } catch {}; Start-Sleep -Milliseconds 500 }; if(-not $ready){exit 1}"
 if errorlevel 1 (

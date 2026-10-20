@@ -21,7 +21,7 @@ export interface MonitorConfig {
   active_nodes_visible: boolean;
   tcp_port: number | null;
   http_url: string | null;
-  snmp: { enabled: boolean; host: string | null; port: number; community: string | null; interface_index: number | null; counter_bits: 32 | 64 };
+  snmp: { enabled: boolean; host: string | null; port: number; community: string | null; interface_index: number | null; counter_bits: 32 | 64; client_discovery_enabled: boolean };
   audio_down: string | null;
   audio_recovered: string | null;
   audio_reminder: string | null;

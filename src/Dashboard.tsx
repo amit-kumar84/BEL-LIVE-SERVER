@@ -1,9 +1,21 @@
 // BEL Cyber Network Operations Status — primary operations dashboard surface.
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, AudioLines, Check, ChevronRight, CircleHelp, Clock3, Download, Gauge, LockKeyhole, LogOut, Maximize, Monitor, Moon, Network, Plus, Radio, Router, Settings2, ShieldCheck, Signal, Sun, Wifi, WifiOff, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, AudioLines, Check, ChevronRight, CircleHelp, Clock3, Download, Gauge, LockKeyhole, LogOut, Maximize, Minimize, Monitor, Moon, Network, Plus, Radio, Router, Settings2, ShieldCheck, Signal, Sun, Upload, Wifi, WifiOff, X } from 'lucide-react';
 import { api, websocketUrl } from './api';
 import { alertAudio } from './audioQueue';
 import type { DashboardData, EventItem, MonitorConfig, MonitorView, Sample } from './types';
+
+declare global {
+  interface Window {
+    belCyberNoc?: {
+      isFullscreen: () => Promise<boolean>;
+      toggleFullscreen: () => Promise<boolean>;
+      focusWindow: () => Promise<boolean> | boolean;
+      raiseAlertAudio: () => Promise<boolean> | boolean;
+      onFullscreenChange: (callback: (fullscreen: boolean) => void) => () => void;
+    };
+  }
+}
 
 const emptyData: DashboardData = { monitors: [], events: [], server_time: '' };
 type DisplayTheme = 'cybertech' | 'classic' | 'modern';
@@ -20,6 +32,7 @@ const bootSequence = [
   'WELCOME, ADMINISTRATOR',
 ];
 const bootAudioFiles = ['/START-ENGLISH-Futuristic-Alert.mp3', '/START-HINDI-Futuristic-Alert.mp3'];
+const maxAlertAudioDurationSeconds = 60;
 
 function stamp(value: string | null | undefined) { return value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '--:--:--'; }
 function incidentDate(value: string | null | undefined) { return value ? new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(value)).toUpperCase() : '-- --- ----'; }
@@ -76,20 +89,50 @@ function maskEndpoint(value: string, masked: boolean) {
   return `${value.slice(0, 3)}***`;
 }
 
+async function prepareAppAudio() {
+  try {
+    await window.belCyberNoc?.raiseAlertAudio?.();
+  } catch (error) {
+    console.error('Unable to raise Windows master volume before audio playback.', error);
+  }
+}
+
+async function audioDuration(file: File) {
+  const source = URL.createObjectURL(file);
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      const audio = new Audio();
+      audio.preload = 'metadata';
+      audio.onloadedmetadata = () => resolve(audio.duration);
+      audio.onerror = () => reject(new Error('AUDIO MUST BE A VALID MP3 OR WAV FILE'));
+      audio.src = source;
+    });
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
 function createMonitor(): MonitorConfig {
-  return { id: crypto.randomUUID().replaceAll('-', '').slice(0, 12), name: 'NEW MONITOR', type: 'internet', custom_type: null, enabled: true, gateway_ip: '', target: '', interval_seconds: 5, timeout_ms: 1200, failure_threshold: 3, recovery_threshold: 2, latency_warning_ms: 150, packet_loss_warning_pct: 5, source_ip: null, throughput_enabled: true, active_nodes_visible: true, tcp_port: null, http_url: null, snmp: { enabled: false, host: null, port: 161, community: null, interface_index: null, counter_bits: 64 }, audio_down: null, audio_recovered: null, audio_reminder: null, alert_repeat_minutes: 30 };
+  return { id: crypto.randomUUID().replaceAll('-', '').slice(0, 12), name: 'NEW MONITOR', type: 'internet', custom_type: null, enabled: true, gateway_ip: '', target: '', interval_seconds: 5, timeout_ms: 1200, failure_threshold: 3, recovery_threshold: 2, latency_warning_ms: 150, packet_loss_warning_pct: 5, source_ip: null, throughput_enabled: true, active_nodes_visible: true, tcp_port: null, http_url: null, snmp: { enabled: false, host: null, port: 161, community: null, interface_index: null, counter_bits: 64, client_discovery_enabled: false }, audio_down: 'down-default-alert.mp3', audio_recovered: 'restored-default-alert.mp3', audio_reminder: null, alert_repeat_minutes: 30 };
 }
 
 export default function Dashboard() {
   const [data, setData] = useState(emptyData);
   const [backend, setBackend] = useState(false);
+  const [fullScreen, setFullScreen] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<'monitors' | 'about'>('monitors');
   const [removeConfirmation, setRemoveConfirmation] = useState<{ id: string; name: string } | null>(null);
   const [adminToken, setAdminToken] = useState(sessionStorage.getItem('cybernoc-admin') || '');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [failedLoginAttempts, setFailedLoginAttempts] = useState(0);
+  const [loginLockedUntil, setLoginLockedUntil] = useState(0);
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [securityWarning, setSecurityWarning] = useState(false);
+  const [accessGrantedOverlay, setAccessGrantedOverlay] = useState(false);
+  const [accessGrantedStage, setAccessGrantedStage] = useState<'granted' | 'welcome'>('granted');
+  const [accessGrantedProgress, setAccessGrantedProgress] = useState(0);
   const [audioFiles, setAudioFiles] = useState<string[]>([]);
   const [editing, setEditing] = useState<MonitorConfig | null>(null);
   const [clock, setClock] = useState(new Date());
@@ -123,12 +166,43 @@ export default function Dashboard() {
   const seenEvents = useRef(new Set<number>());
   const wsRef = useRef<WebSocket | null>(null);
   const bootAudioRef = useRef<HTMLAudioElement | null>(null);
+  const applyDashboardData = (next: DashboardData) => {
+    setData(next);
+    monitorsRef.current = next.monitors;
+  };
   const backendOfflineAudioRef = useRef<HTMLAudioElement | null>(null);
   const accessGrantedAudioRef = useRef<HTMLAudioElement | null>(null);
   const accessDeniedAudioRef = useRef<HTMLAudioElement | null>(null);
   const securityWarningAudioRef = useRef<HTMLAudioElement | null>(null);
   const monitorsRef = useRef(data.monitors);
   monitorsRef.current = data.monitors;
+
+  useEffect(() => {
+    const updateFullscreen = (fullscreen: boolean) => setFullScreen(fullscreen);
+    if (window.belCyberNoc) {
+      void window.belCyberNoc.isFullscreen().then(updateFullscreen);
+      return window.belCyberNoc.onFullscreenChange(updateFullscreen);
+    }
+    const handleFullscreenChange = () => updateFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    handleFullscreenChange();
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (loginLockedUntil === 0) {
+      setCooldownSeconds(0);
+      return;
+    }
+    const updateCooldown = () => {
+      const remaining = Math.max(0, Math.ceil((loginLockedUntil - Date.now()) / 1000));
+      setCooldownSeconds(remaining);
+      if (remaining <= 0) setLoginLockedUntil(0);
+    };
+    updateCooldown();
+    const timer = window.setInterval(updateCooldown, 1000);
+    return () => window.clearInterval(timer);
+  }, [loginLockedUntil]);
 
   useEffect(() => {
     if (!showBootSequence) return;
@@ -149,7 +223,7 @@ export default function Dashboard() {
       audio.pause();
       setShowBootSequence(false);
     };
-    const startAudio = () => void audio.play().catch((error: unknown) => {
+    const startAudio = () => void prepareAppAudio().then(() => audio.play()).catch((error: unknown) => {
       if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play boot audio.', error);
     });
     const handleMetadata = () => {
@@ -169,14 +243,26 @@ export default function Dashboard() {
     };
   }, [showBootSequence]);
 
+  useEffect(() => alertAudio.setPlaybackPreparation(prepareAppAudio), []);
+
+  useEffect(() => {
+    if (window.belCyberNoc) alertAudio.unlock();
+  }, []);
+
   useEffect(() => alertAudio.subscribe((playback) => {
     if (playback.phase === 'started') {
       const monitorName = monitorsRef.current.find((entry) => entry.config.id === playback.monitorId)?.config.name || playback.monitorId;
       setAudioAlert({ kind: playback.kind as 'down' | 'recovered' | 'down-reminder', monitorName });
+      window.belCyberNoc?.focusWindow?.();
     } else {
       setAudioAlert(null);
     }
   }), []);
+
+  useEffect(() => {
+    if (!audioAlert) return;
+    window.belCyberNoc?.focusWindow?.();
+  }, [audioAlert]);
 
   useEffect(() => {
     if (backend) {
@@ -189,7 +275,7 @@ export default function Dashboard() {
     const audio = backendOfflineAudioRef.current;
     if (audio) {
       audio.currentTime = 0;
-      void audio.play().catch((error: unknown) => {
+      void prepareAppAudio().then(() => audio.play()).catch((error: unknown) => {
         if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play backend offline audio.', error);
       });
     }
@@ -205,7 +291,7 @@ export default function Dashboard() {
     window.addEventListener('bel-cybernoc-auth-expired', expireAdminSession);
     const timer = window.setInterval(() => setClock(new Date()), 1000);
     const poll = async () => {
-      try { const snapshot = await api<DashboardData>('/api/dashboard'); setData(snapshot); setBackend(true); }
+      try { const snapshot = await api<DashboardData>('/api/dashboard'); applyDashboardData(snapshot); setBackend(true); }
       catch { setBackend(false); }
     };
     void poll();
@@ -218,7 +304,7 @@ export default function Dashboard() {
       socket.onopen = () => setBackend(true);
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        if (message.type === 'snapshot') setData(message.data);
+        if (message.type === 'snapshot') applyDashboardData(message.data);
         if (message.type === 'event') {
           const item = message.event as EventItem;
           setData((current) => ({ ...current, events: [
@@ -271,37 +357,76 @@ export default function Dashboard() {
     .slice(0, 4), [data.events]);
 
   async function signIn(event: React.FormEvent) {
-    event.preventDefault(); setLoginError('');
+    event.preventDefault();
+    const isLocked = loginLockedUntil > Date.now();
+    if (isLocked) {
+      const remaining = Math.max(1, Math.ceil((loginLockedUntil - Date.now()) / 1000));
+      setLoginError(`ACCESS LOCKED — RETRY IN ${remaining}s`);
+      return;
+    }
+    setLoginError('');
     try {
       const result = await api<{ token: string }>('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: loginPassword }) });
-      setAdminToken(result.token);
-      sessionStorage.setItem('cybernoc-admin', result.token);
       setLoginPassword('');
       setLoginError('');
       setFailedLoginAttempts(0);
+      setLoginLockedUntil(0);
       setSecurityWarning(false);
-      void playSecurityAudio(accessGrantedAudioRef);
-      setNotice('ACCESS GRANTED');
+      setAccessGrantedStage('granted');
+      setAccessGrantedProgress(0);
+      setAccessGrantedOverlay(true);
+      await playSecurityAudio(accessGrantedAudioRef, (progress) => {
+        setAccessGrantedProgress(progress);
+        if (progress >= 0.45) setAccessGrantedStage('welcome');
+      });
+      setAdminToken(result.token);
+      sessionStorage.setItem('cybernoc-admin', result.token);
+      setDrawer(true);
+      setAccessGrantedOverlay(false);
     } catch (error) {
       const nextAttempts = failedLoginAttempts + 1;
       setFailedLoginAttempts(nextAttempts);
       setLoginPassword('');
-      setLoginError('ACCESS DENIED — INCORRECT ADMIN PASSWORD');
-      if (nextAttempts > 3) {
+      if (nextAttempts >= 3) {
+        const lockUntil = Date.now() + 30_000;
+        setLoginLockedUntil(lockUntil);
         setSecurityWarning(true);
+        setLoginError('ACCESS DENIED — AUTH LOCKED FOR 30 SECONDS');
         void playSecurityAudio(securityWarningAudioRef);
       } else {
+        setLoginError('ACCESS DENIED — INCORRECT ADMIN PASSWORD');
         void playSecurityAudio(accessDeniedAudioRef);
       }
     }
   }
 
-  function playSecurityAudio(audioRef: { current: HTMLAudioElement | null }) {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = 0;
-    void audio.play().catch((error: unknown) => {
-      if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play security audio.', error);
+  function playSecurityAudio(audioRef: { current: HTMLAudioElement | null }, onProgress?: (progress: number) => void) {
+    return new Promise<void>((resolve) => {
+      const audio = audioRef.current;
+      if (!audio) {
+        resolve();
+        return;
+      }
+      const cleanup = () => {
+        audio.onended = null;
+        audio.onerror = null;
+        audio.ontimeupdate = null;
+        resolve();
+      };
+      audio.currentTime = 0;
+      audio.onended = () => {
+        onProgress?.(1);
+        cleanup();
+      };
+      audio.onerror = cleanup;
+      audio.ontimeupdate = () => {
+        if (!audio.duration || !Number.isFinite(audio.duration)) return;
+        onProgress?.(Math.min(1, audio.currentTime / audio.duration));
+      };
+      void prepareAppAudio().then(() => audio.play()).catch((error: unknown) => {
+        if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') console.error('Unable to play security audio.', error);
+        cleanup();
+      });
     });
   }
 
@@ -336,8 +461,29 @@ export default function Dashboard() {
       else configs[currentIndex] = editing;
       await api('/api/admin/monitors', { method: 'PUT', body: JSON.stringify({ monitors: configs }) }, adminToken);
       setEditing(null); setNotice('CONFIGURATION SAVED'); window.setTimeout(() => setNotice(''), 2500);
-      const snapshot = await api<DashboardData>('/api/dashboard'); setData(snapshot);
+      const snapshot = await api<DashboardData>('/api/dashboard'); applyDashboardData(snapshot);
     } catch (error) { setNotice(error instanceof Error ? error.message.toUpperCase() : 'SAVE FAILED'); }
+  }
+
+  async function uploadAudioFile(file: File) {
+    if (!adminToken) throw new Error('SIGN IN TO UPLOAD AUDIO');
+    try {
+      const duration = await audioDuration(file);
+      if (!Number.isFinite(duration) || duration <= 0) throw new Error('AUDIO DURATION COULD NOT BE READ');
+      if (duration > maxAlertAudioDurationSeconds) throw new Error('AUDIO MUST NOT EXCEED 60 SECONDS');
+      const result = await api<{ file: string }>(`/api/admin/audio/${encodeURIComponent(file.name)}`, {
+        method: 'PUT',
+        body: file,
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      }, adminToken);
+      setAudioFiles((current) => [...new Set([...current, result.file])].sort());
+      setNotice(`AUDIO SAVED: ${result.file.toUpperCase()}`);
+      window.setTimeout(() => setNotice(''), 2500);
+      return result.file;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message.toUpperCase() : 'AUDIO UPLOAD FAILED');
+      throw error;
+    }
   }
 
   async function moveMonitor(monitorId: string, direction: -1 | 1) {
@@ -349,7 +495,7 @@ export default function Dashboard() {
     [configs[currentIndex], configs[nextIndex]] = [configs[nextIndex], configs[currentIndex]];
     try {
       await api('/api/admin/monitors', { method: 'PUT', body: JSON.stringify({ monitors: configs }) }, adminToken);
-      setData(await api<DashboardData>('/api/dashboard'));
+      applyDashboardData(await api<DashboardData>('/api/dashboard'));
     } catch (error) {
       setNotice(error instanceof Error ? error.message.toUpperCase() : 'ORDER UPDATE FAILED');
     }
@@ -368,7 +514,7 @@ export default function Dashboard() {
       await api('/api/admin/monitors', { method: 'PUT', body: JSON.stringify({ monitors: configs }) }, adminToken);
       setEditing(null);
       setRemoveConfirmation(null);
-      setData(await api<DashboardData>('/api/dashboard'));
+      applyDashboardData(await api<DashboardData>('/api/dashboard'));
       setNotice('MONITOR REMOVED');
     } catch (error) {
       setRemoveConfirmation(null);
@@ -454,6 +600,18 @@ export default function Dashboard() {
     <audio ref={accessGrantedAudioRef} src="/Access-Granted-Futuristic-Alert.mp3" preload="auto" />
     <audio ref={accessDeniedAudioRef} src="/Access-Denied-Futuristic-Alert.mp3" preload="auto" />
     <audio ref={securityWarningAudioRef} src="/SECURITY-WARNING-Futuristic-Alert.mp3" preload="auto" />
+    {accessGrantedOverlay && <div className="access-granted-overlay" role="status" aria-live="polite">
+      <div className="access-granted-glow" />
+      <div className="access-granted-core">
+        <div className="access-granted-ring"><LockKeyhole size={68} /></div>
+        <span className="access-granted-kicker">{accessGrantedStage === 'granted' ? '/// AUTHORIZATION CONFIRMED ///' : '/// SECURE SESSION INITIALIZED ///'}</span>
+        <strong key={accessGrantedStage} className="access-granted-title">{accessGrantedStage === 'granted' ? 'ACCESS GRANTED' : 'WELCOME ADMINISTRATOR'}</strong>
+        <span className="access-granted-message">{accessGrantedStage === 'granted' ? 'VERIFYING SECURE CREDENTIALS' : 'CONFIGURATION MATRIX UNLOCKED'}</span>
+        <div className="access-granted-progress" role="progressbar" aria-label="Access confirmation audio" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(accessGrantedProgress * 100)}>
+          <span style={{ transform: `scaleX(${accessGrantedProgress})` }} />
+        </div>
+      </div>
+    </div>}
     {securityWarning && <div className="security-warning-overlay" role="alert" aria-live="assertive">
       <div className="security-warning-grid" aria-hidden="true" />
       <div className="security-warning-core">
@@ -461,7 +619,7 @@ export default function Dashboard() {
         <span className="security-warning-kicker">/// SECURITY PROTOCOL TRIGGERED ///</span>
         <strong>ACCESS BLOCKED</strong>
         <span className="security-warning-message">MULTIPLE INVALID ADMIN AUTHENTICATION ATTEMPTS</span>
-        <div className="security-warning-status"><i /> SECURITY WARNING <b>·</b> ATTEMPTS DETECTED: {failedLoginAttempts}</div>
+        <div className="security-warning-status"><i /> SECURITY WARNING <b>·</b> COOLDOWN ACTIVE: {cooldownSeconds}s</div>
         <span className="security-warning-hint">VERIFY CREDENTIALS BEFORE RETRYING</span>
         <button type="button" className="security-warning-dismiss" onClick={() => setSecurityWarning(false)}>ACKNOWLEDGE WARNING <ChevronRight size={15} /></button>
       </div>
@@ -469,7 +627,7 @@ export default function Dashboard() {
     <header className="topbar">
       <div className="brand"><img className="brand-logo" src="/bel.ico" alt="BEL" /><div><div className="brand-name">BEL <span>IS&MS Network Operations Status</span></div><div className="brand-sub">BHARAT ELECTRONICS LIMITED <i>///</i> KOTDWARA</div></div><Network className="brand-end-icon" size={21} strokeWidth={1.8} aria-hidden="true" /></div>
       <div className="top-center"><span className={`live-pip ${backend ? 'is-live' : ''}`} />{backend ? 'TELEMETRY LINK ACTIVE' : 'BACKEND DISCONNECTED'}<b>·</b><span>LOCAL / LOOPBACK</span></div>
-      <div className="top-actions"><div className="clock"><strong>{clock.toLocaleTimeString([], { hour12: false })}</strong><span>{clock.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}</span></div>{displayTheme === 'modern' && <button className="icon-button color-mode-button is-modern-mode" title={`Switch to ${modernColorMode === 'light' ? 'dark' : 'light'} mode`} aria-label={`Switch to ${modernColorMode === 'light' ? 'dark' : 'light'} mode`} onClick={toggleModernColorMode}>{modernColorMode === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button>}<button className="icon-button" title="Enter full screen" onClick={() => document.documentElement.requestFullscreen?.()}><Maximize size={18} /></button><button className="icon-button" title="Monitor configuration" onClick={() => setDrawer(true)}><Settings2 size={19} /></button></div>
+      <div className="top-actions"><div className="clock"><strong>{clock.toLocaleTimeString([], { hour12: false })}</strong><span>{clock.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase()}</span></div>{displayTheme === 'modern' && <button className="icon-button color-mode-button is-modern-mode" title={`Switch to ${modernColorMode === 'light' ? 'dark' : 'light'} mode`} aria-label={`Switch to ${modernColorMode === 'light' ? 'dark' : 'light'} mode`} onClick={toggleModernColorMode}>{modernColorMode === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button>}<button className="icon-button" title={fullScreen ? 'Exit full screen' : 'Enter full screen'} aria-label={fullScreen ? 'Exit full screen' : 'Enter full screen'} onClick={() => { if (window.belCyberNoc) void window.belCyberNoc.toggleFullscreen(); else if (document.fullscreenElement) void document.exitFullscreen(); else void document.documentElement.requestFullscreen?.(); }}>{fullScreen ? <Minimize size={18} /> : <Maximize size={18} />}</button><button className="icon-button" title="Monitor configuration" onClick={() => setDrawer(true)}><Settings2 size={19} /></button></div>
     </header>
 
     {(sim || currentProblem) && <div className={`alert-ribbon ${sim ? 'simulated' : ''}`}><AlertTriangle size={19} /><strong>{sim ? 'SIMULATED INCIDENT' : 'NETWORK INCIDENT'}</strong><span>{sim ? 'PREVIEW ONLY — SIMULATED LINE FAILURE' : currentProblem ? `${currentProblem.config.name} — ${statusLabels[currentProblem.status] || currentProblem.status.toUpperCase()}${problemMonitors.length > 1 ? ` (+${problemMonitors.length - 1})` : ''}` : ''}</span><span className="ribbon-time">{sim ? 'NOT LIVE' : currentProblem?.last_check ? stamp(currentProblem.last_check) : 'INVESTIGATING'}</span></div>}
@@ -513,32 +671,30 @@ export default function Dashboard() {
             <button className="icon-button" onClick={() => { setDrawer(false); setEditing(null); }} aria-label="Close"><X size={19} /></button>
           </div>
         </div>
-        {adminToken && <div className="display-settings">
-          <div className="form-section-title">WALL DISPLAY</div>
-          <div className="display-setting-row">
-            <span>MONITORS PER ROW</span>
-            <div className="display-segmented" role="group" aria-label="Monitors per row">
-              {[2, 3, 4].map((count) => <button key={count} type="button" className={cardsPerRow === count ? 'selected' : ''} aria-pressed={cardsPerRow === count} onClick={() => chooseCardsPerRow(count)}>{count}</button>)}
+        <div className="drawer-tabs" role="tablist" aria-label="Drawer navigation">
+          <button type="button" className={drawerTab === 'monitors' ? 'selected' : ''} onClick={() => setDrawerTab('monitors')} role="tab" aria-selected={drawerTab === 'monitors'}>MONITORS</button>
+          <button type="button" className={drawerTab === 'about' ? 'selected' : ''} onClick={() => setDrawerTab('about')} role="tab" aria-selected={drawerTab === 'about'}>ABOUT</button>
+        </div>
+        {drawerTab === 'about' ? <AboutCard /> : adminToken ? <>
+          <div className="display-settings">
+            <div className="form-section-title">WALL DISPLAY</div>
+            <div className="display-setting-row">
+              <span>MONITORS PER ROW</span>
+              <div className="display-segmented" role="group" aria-label="Monitors per row">
+                {[2, 3, 4].map((count) => <button key={count} type="button" className={cardsPerRow === count ? 'selected' : ''} aria-pressed={cardsPerRow === count} onClick={() => chooseCardsPerRow(count)}>{count}</button>)}
+              </div>
             </div>
-          </div>
-          <div className="display-setting-row">
-            <span>VISUAL THEME</span>
-            <div className="display-segmented theme-segmented" role="group" aria-label="Visual theme">
-              <button type="button" className={displayTheme === 'cybertech' ? 'selected' : ''} aria-pressed={displayTheme === 'cybertech'} onClick={() => chooseDisplayTheme('cybertech')}>CYBERTECH</button>
-              <button type="button" className={displayTheme === 'classic' ? 'selected' : ''} aria-pressed={displayTheme === 'classic'} onClick={() => chooseDisplayTheme('classic')}>CLASSIC</button>
-              <button type="button" className={displayTheme === 'modern' ? 'selected' : ''} aria-pressed={displayTheme === 'modern'} onClick={() => chooseDisplayTheme('modern')}>MODERN</button>
+            <div className="display-setting-row">
+              <span>VISUAL THEME</span>
+              <div className="display-segmented theme-segmented" role="group" aria-label="Visual theme">
+                <button type="button" className={displayTheme === 'cybertech' ? 'selected' : ''} aria-pressed={displayTheme === 'cybertech'} onClick={() => chooseDisplayTheme('cybertech')}>CYBERTECH</button>
+                <button type="button" className={displayTheme === 'classic' ? 'selected' : ''} aria-pressed={displayTheme === 'classic'} onClick={() => chooseDisplayTheme('classic')}>CLASSIC</button>
+                <button type="button" className={displayTheme === 'modern' ? 'selected' : ''} aria-pressed={displayTheme === 'modern'} onClick={() => chooseDisplayTheme('modern')}>MODERN</button>
+              </div>
             </div>
+            <button type="button" className={`simulation-toggle drawer-simulation ${sim ? 'selected' : ''}`} onClick={() => { toggleSimulation(); setDrawer(false); }}><Activity size={14} /> {sim ? 'END SIMULATION' : 'SIMULATION PREVIEW'}</button>
+            <div className="export-settings"><div className="form-section-title">INCIDENT LOG EXPORT <span className="optional">IST · 12-HOUR FORMAT</span></div><div className="export-dates"><label>FROM<input type="date" value={exportDates.start} onChange={(event) => setExportDates((current) => ({ ...current, start: event.target.value }))} /></label><label>TO<input type="date" value={exportDates.end} onChange={(event) => setExportDates((current) => ({ ...current, end: event.target.value }))} /></label></div><button type="button" className="add-monitor export-button" onClick={() => void exportIncidents()}><Download size={14} /> EXPORT EXCEL CSV</button></div>
           </div>
-          <button type="button" className={`simulation-toggle drawer-simulation ${sim ? 'selected' : ''}`} onClick={() => { toggleSimulation(); setDrawer(false); }}><Activity size={14} /> {sim ? 'END SIMULATION' : 'SIMULATION PREVIEW'}</button>
-          <div className="export-settings"><div className="form-section-title">INCIDENT LOG EXPORT <span className="optional">IST · 12-HOUR FORMAT</span></div><div className="export-dates"><label>FROM<input type="date" value={exportDates.start} onChange={(event) => setExportDates((current) => ({ ...current, start: event.target.value }))} /></label><label>TO<input type="date" value={exportDates.end} onChange={(event) => setExportDates((current) => ({ ...current, end: event.target.value }))} /></label></div><button type="button" className="add-monitor export-button" onClick={() => void exportIncidents()}><Download size={14} /> EXPORT EXCEL CSV</button></div>
-        </div>}
-        {!adminToken ? <form className="login-box" onSubmit={signIn}>
-          <LockKeyhole size={22} /><h3>ADMIN AUTHENTICATION</h3>
-          <p>Configuration changes require the local admin password from the backend data folder.</p>
-          <label>ADMIN PASSWORD<input type="password" autoComplete="current-password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} required /></label>
-          {loginError && <div className="form-error">{loginError}</div>}
-          <button className="save-button">UNLOCK CONFIGURATION <ChevronRight size={15} /></button>
-        </form> : <>
           <div className="drawer-toolbar">
             <span>{data.monitors.length} CONFIGURED LINES</span>
             <button onClick={() => setEditing(createMonitor())}><Plus size={14} /> NEW MONITOR</button>
@@ -556,8 +712,14 @@ export default function Dashboard() {
               </div>
             </div>)}
           </div>
-          {editing && <MonitorForm key={editing.id} value={editing} files={audioFiles} maskNetworkIps={maskedNetworkLines[editing.id] === true} onMaskNetworkIpsChange={(masked) => setNetworkIpMask(editing.id, masked)} onChange={setEditing} onSubmit={saveMonitor} onRemove={() => removeMonitor(editing.id, editing.name)} isNew={!data.monitors.some((item) => item.config.id === editing.id)} onTestAudio={(filename) => void alertAudio.test(filename, adminToken).catch((error) => setNotice(error.message.toUpperCase()))} />}
-        </>}
+          {editing && <MonitorForm key={editing.id} value={editing} files={audioFiles} maskNetworkIps={maskedNetworkLines[editing.id] === true} onMaskNetworkIpsChange={(masked) => setNetworkIpMask(editing.id, masked)} onChange={setEditing} onSubmit={saveMonitor} onRemove={() => removeMonitor(editing.id, editing.name)} isNew={!data.monitors.some((item) => item.config.id === editing.id)} onTestAudio={(filename) => void alertAudio.test(filename, adminToken).catch((error) => setNotice(error.message.toUpperCase()))} onUploadAudio={uploadAudioFile} />}
+        </> : <form className="login-box" onSubmit={signIn}>
+          <LockKeyhole size={22} /><h3>ADMIN AUTHENTICATION</h3>
+          <p>Configuration changes require the local admin password from the backend data folder.</p>
+          <label>ADMIN PASSWORD<input type="password" autoComplete="current-password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} required disabled={loginLockedUntil > Date.now()} /></label>
+          {loginError && <div className="form-error">{loginError}</div>}
+          <button className="save-button" disabled={loginLockedUntil > Date.now()}>{loginLockedUntil > Date.now() ? `LOCKED ${cooldownSeconds}s` : 'UNLOCK CONFIGURATION'} <ChevronRight size={15} /></button>
+        </form>}
       </aside>
     </div>}
     {removeConfirmation && <div className="confirmation-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRemoveConfirmation(null); }}>
@@ -576,6 +738,62 @@ export default function Dashboard() {
   </main>;
 }
 
+function AboutCard() {
+  return <div className="about-panel-shell">
+    <div className="about-card">
+      <div className="about-card-glow" />
+      <div className="about-card-header">
+        <div>
+          <span className="section-index">SYS / ABOUT</span>
+          <h3>BEL CYBERNOC</h3>
+        </div>
+        <div className="about-badge">v1.0.0</div>
+      </div>
+      <p className="about-kicker">WINDOWS NETWORK OPERATIONS PLATFORM</p>
+      <div className="about-hero">
+        <div className="about-logo"><ShieldCheck size={20} /></div>
+        <div>
+          <strong>Developed by Amit Kumar</strong>
+          <span>Developed for Bharat Electronics Limited, Kotdwar, to give operators a clear, real-time view of configured network links and services.</span>
+        </div>
+      </div>
+      <section className="about-details" aria-labelledby="about-capabilities-title">
+        <h4 id="about-capabilities-title">PLATFORM CAPABILITIES</h4>
+        <p>BEL CyberNOC checks configured gateways, remote targets, and application endpoints, then brings their availability and performance into one live operations dashboard.</p>
+        <ul>
+          <li><strong>Connectivity:</strong> independent gateway and target checks, with optional TCP-port and HTTP(S) health tests.</li>
+          <li><strong>Performance:</strong> response time, packet loss, daily uptime, and historical measurements for each monitored line.</li>
+          <li><strong>Traffic:</strong> RX/TX throughput from read-only SNMP counters or the selected Windows network adapter.</li>
+          <li><strong>Operations:</strong> live down/recovery status, visual and audio alerts, configurable thresholds, and incident export by IST date range.</li>
+        </ul>
+        <p className="about-data-note">Monitoring history is stored locally. Checks should only be configured for systems and networks you are authorized to monitor.</p>
+      </section>
+      <div className="about-meta-grid">
+        <div className="about-meta">
+          <span>Developer</span>
+          <strong>Amit Kumar</strong>
+        </div>
+        <div className="about-meta">
+          <span>GitHub</span>
+          <a href="https://github.com/amit-kumar84" target="_blank" rel="noreferrer">github.com/amit-kumar84</a>
+        </div>
+        <div className="about-meta">
+          <span>Developed</span>
+          <strong>2026</strong>
+        </div>
+        <div className="about-meta">
+          <span>Built for</span>
+          <strong>Bharat Electronics Limited, Kotdwar</strong>
+        </div>
+      </div>
+      <div className="about-footer">
+        <div><Radio size={14} /> Gateway & target monitoring</div>
+        <div><Network size={14} /> Live incident & alert visibility</div>
+      </div>
+    </div>
+  </div>;
+}
+
 function Metric({ icon, label, value, tone }: { icon: React.ReactNode; label: string; value: string; tone: string }) { return <div className="metric"><div className={`metric-icon ${tone}`}>{icon}</div><div><span>{label}</span><strong className={tone}>{value}</strong></div></div>; }
 function PanelTitle({ index, title, right }: { index: string; title: string; right?: React.ReactNode }) { return <div className="panel-title"><div><span>{index}</span><h2>{title}</h2></div>{right}</div>; }
 function ResourceMeter({ label, value, percent }: { label: string; value: string; percent: number | null }) {
@@ -591,11 +809,12 @@ function MonitorCard({ monitor, index, simulated, maskNetworkIps, onEdit }: { mo
   const previewStatus = simulated && index === 0 ? 'down' : simulated && index === 1 ? 'degraded' : monitor.status;
   const stateClass = simulated && index < 2 ? previewStatus : !config.enabled ? 'disabled' : previewStatus;
   const lineDown = ['down', 'gateway_down', 'upstream_down', 'application_down'].includes(stateClass);
+  const clientSourceLabel = monitor.connected_clients.source === 'snmp' ? 'SNMP-observed' : 'ARP-observed';
   const displayUptime = monitor.uptime_pct_24h;
-  const displayLoss = displayUptime === null ? null : 100 - displayUptime;
+  const displayLoss = monitor.packet_loss_pct;
   const history = monitor.history.slice(-32);
   return <article className={`monitor-card state-${stateClass}`}>
-    <div className="card-accent" />    <div className="card-head"><div className="card-name"><span className="line-number">LN-{String(index + 1).padStart(2, '0')}</span><div className="card-title-group"><div className="card-title-row"><h2>{config.name}</h2>{config.active_nodes_visible && <div className={`card-client-count ${monitor.status}`} title={`Active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`} aria-label={`Active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`}><i className="active-node-pulse" /><Monitor size={15} /><strong>{monitor.connected_clients.count ?? '--'}</strong></div>}</div><span className="card-type">{(config.custom_type || config.type.replace('_', ' ')).toUpperCase()}</span></div></div><div className={`state-badge ${stateClass}`}><span />{statusLabels[stateClass] || stateClass.toUpperCase()}</div><button className="card-settings" onClick={onEdit} title="Edit monitor"><Settings2 size={16} /></button></div>
+    <div className="card-accent" />    <div className="card-head"><div className="card-name"><span className="line-number">LN-{String(index + 1).padStart(2, '0')}</span><div className="card-title-group"><div className="card-title-row"><h2>{config.name}</h2>{config.active_nodes_visible && <div className={`card-client-count ${monitor.status}`} title={`${clientSourceLabel} active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`} aria-label={`${clientSourceLabel} active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`}><i className="active-node-pulse" /><Monitor size={15} /><strong>{monitor.connected_clients.count ?? '--'}</strong></div>}</div><span className="card-type">{(config.custom_type || config.type.replace('_', ' ')).toUpperCase()}</span></div></div><div className={`state-badge ${stateClass}`}><span />{statusLabels[stateClass] || stateClass.toUpperCase()}</div><button className="card-settings" onClick={onEdit} title="Edit monitor"><Settings2 size={16} /></button></div>
     <div className="endpoint-row"><div><span>GATEWAY <Signal className={`network-icon ${endpointState(monitor.gateway_reachable)}`} size={13} /></span><strong>{maskEndpoint(config.gateway_ip, maskNetworkIps) || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.gateway_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.gateway_reachable)}</small></div><div className="endpoint-link"><span /></div><div><span>REMOTE TARGET <Signal className={`network-icon ${endpointState(monitor.target_reachable)}`} size={13} /></span><strong>{maskEndpoint(config.target, maskNetworkIps) || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.target_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.target_reachable)}</small></div></div>
     <div className="card-metrics"><div className={metricTone(monitor.latency_ms, config.latency_warning_ms)}><span><Signal size={13} /> RTT</span><strong>{simulated && index === 0 ? '---' : latency(monitor.latency_ms)}</strong></div><div className={lossTone(displayLoss)}><span>{lineDown ? <WifiOff className="line-down-icon" size={13} /> : <Wifi size={13} />} LOSS</span><strong>{simulated && index === 0 ? '---' : displayLoss === null ? '---' : `${displayLoss.toFixed(1)}%`}</strong></div><div className={uptimeTone(displayUptime)}><span><Clock3 size={13} /> DAILY UPTIME</span><strong>{displayUptime === null ? '---' : `${displayUptime.toFixed(1)}%`}</strong></div></div>
     <div className="history-chart"><div className="chart-title"><span>LATENCY / HISTORY</span><span>{monitor.last_check ? stamp(monitor.last_check) : 'AWAITING DATA'}</span></div><MiniChart samples={history} status={previewStatus} /></div>
@@ -612,7 +831,7 @@ function MiniChart({ samples, status }: { samples: Sample[]; status: string }) {
   return <svg viewBox="0 0 100 30" preserveAspectRatio="none" className={`chart-svg ${status}`} aria-label="Historical latency chart"><line x1="0" x2="100" y1="26" y2="26" className="chart-axis" /><polyline points={`0,28 ${points} 100,28`} className="chart-area" /><polyline points={points} className="chart-line" /></svg>;
 }
 
-function MonitorForm({ value, files, maskNetworkIps, onMaskNetworkIpsChange, onChange, onSubmit, onRemove, isNew, onTestAudio }: { value: MonitorConfig; files: string[]; maskNetworkIps: boolean; onMaskNetworkIpsChange: (masked: boolean) => void; onChange: (value: MonitorConfig) => void; onSubmit: (event: React.FormEvent) => void; onRemove: () => void; isNew: boolean; onTestAudio: (file: string) => void }) {
+function MonitorForm({ value, files, maskNetworkIps, onMaskNetworkIpsChange, onChange, onSubmit, onRemove, isNew, onTestAudio, onUploadAudio }: { value: MonitorConfig; files: string[]; maskNetworkIps: boolean; onMaskNetworkIpsChange: (masked: boolean) => void; onChange: (value: MonitorConfig) => void; onSubmit: (event: React.FormEvent) => void; onRemove: () => void; isNew: boolean; onTestAudio: (file: string) => void; onUploadAudio: (file: File) => Promise<string> }) {
   const update = <K extends keyof MonitorConfig>(key: K, next: MonitorConfig[K]) => onChange({ ...value, [key]: next });
   const updateSnmp = (key: keyof MonitorConfig['snmp'], next: MonitorConfig['snmp'][keyof MonitorConfig['snmp']]) => onChange({ ...value, snmp: { ...value.snmp, [key]: next } });
   return <form className="monitor-form" onSubmit={onSubmit}>
@@ -643,13 +862,49 @@ function MonitorForm({ value, files, maskNetworkIps, onMaskNetworkIpsChange, onC
     <label className="toggle-row">RX / TX SPEED<input type="checkbox" checked={value.throughput_enabled} onChange={(event) => update('throughput_enabled', event.target.checked)} /><span /></label>
     <div className="form-hint">Uses SNMP first, then local Windows adapter fallback.</div>
     <div className="form-section-title">ACTIVE NODE DISPLAY</div>
-    <label className="toggle-row">SHOW ACTIVE NODE COUNT<input type="checkbox" checked={value.active_nodes_visible} onChange={(event) => update('active_nodes_visible', event.target.checked)} /><span /></label>
-    <div className="form-hint">Shows the real-time observed PC/node count beside the line name.</div>
-    <div className="form-section-title">SNMP INTERFACE COUNTERS</div>
-    <label className="toggle-row">SNMP COUNTERS<input type="checkbox" checked={value.snmp.enabled} onChange={(event) => updateSnmp('enabled', event.target.checked)} /><span /></label>
-    {value.snmp.enabled && <><label>SNMP HOST<input value={value.snmp.host || ''} onChange={(event) => updateSnmp('host', event.target.value || null)} required /></label><div className="form-two"><label>READ-ONLY COMMUNITY<input type="password" value={value.snmp.community || ''} onChange={(event) => updateSnmp('community', event.target.value || null)} required /></label><label>IF INDEX<input type="number" min="1" value={value.snmp.interface_index || ''} onChange={(event) => updateSnmp('interface_index', event.target.value ? Number(event.target.value) : null)} required /></label></div><label>COUNTER WIDTH<select value={value.snmp.counter_bits} onChange={(event) => updateSnmp('counter_bits', Number(event.target.value) as 32 | 64)}><option value="64">64-BIT (IF-MIB HIGH CAPACITY)</option><option value="32">32-BIT (IF-MIB)</option></select></label></>}
-    <div className="form-section-title">VOICE ALERT MAPPING <span className="optional">AUDIO FOLDER: C:\CyberNOC\audio</span></div><AudioSelect label="DOWN ALERT" value={value.audio_down} files={files} onChange={(next) => update('audio_down', next)} onTest={onTestAudio} /><AudioSelect label="RECOVERY ALERT" value={value.audio_recovered} files={files} onChange={(next) => update('audio_recovered', next)} onTest={onTestAudio} /><AudioSelect label="REPEAT ALERT AUDIO" value={value.audio_reminder} files={files} onChange={(next) => update('audio_reminder', next)} onTest={onTestAudio} /><label>REPEAT EVERY (MINUTES)<span className="optional">DEFAULT 30 · RANGE 1–1440</span><input type="number" min="1" max="1440" step="1" value={value.alert_repeat_minutes} onChange={(event) => update('alert_repeat_minutes', Number(event.target.value))} required /></label>
+    <label className="toggle-row">{value.snmp.client_discovery_enabled ? 'SHOW SNMP / ARP-OBSERVED NODE COUNT' : 'SHOW ARP-OBSERVED NODE COUNT'}<input type="checkbox" checked={value.active_nodes_visible} onChange={(event) => update('active_nodes_visible', event.target.checked)} /><span /></label>
+    <div className="form-hint">{value.snmp.client_discovery_enabled ? 'Prefers standard SNMP tables and falls back to this Windows PC ARP cache; count is an estimate.' : 'Observed by this Windows PC ARP cache; count is an estimate, not a complete inventory.'}</div>
+    <div className="form-section-title">SNMP CLIENT DISCOVERY</div>
+    <label className="toggle-row">ENABLE SNMP DEVICE COUNT<input type="checkbox" checked={value.snmp.client_discovery_enabled} onChange={(event) => updateSnmp('client_discovery_enabled', event.target.checked)} /><span /></label>
+    <div className="form-hint">Uses standard IP-MIB and BRIDGE-MIB tables when exposed by the router or switch. Deduplicates MACs, refreshes every 60 seconds, and falls back to Windows ARP.</div>
+    <div className="form-section-title">SNMP INTERFACE COUNTERS (RX / TX)</div>
+    <label className="toggle-row">ENABLE SNMP RX / TX COUNTERS<input type="checkbox" checked={value.snmp.enabled} onChange={(event) => updateSnmp('enabled', event.target.checked)} /><span /></label>
+    {(value.snmp.enabled || value.snmp.client_discovery_enabled) && <>
+      <label>SNMP HOST<input value={value.snmp.host || ''} onChange={(event) => updateSnmp('host', event.target.value || null)} required /></label>
+      <div className="form-two">
+        <label>SNMP PORT<input type="number" min="1" max="65535" value={value.snmp.port} onChange={(event) => updateSnmp('port', Number(event.target.value))} required /></label>
+        <label>READ-ONLY COMMUNITY<input type="password" value={value.snmp.community || ''} onChange={(event) => updateSnmp('community', event.target.value || null)} required /></label>
+      </div>
+      {value.snmp.enabled && <>
+        <label>IF INDEX<input type="number" min="1" value={value.snmp.interface_index || ''} onChange={(event) => updateSnmp('interface_index', event.target.value ? Number(event.target.value) : null)} required /></label>
+        <label>COUNTER WIDTH<select value={value.snmp.counter_bits} onChange={(event) => updateSnmp('counter_bits', Number(event.target.value) as 32 | 64)}><option value="64">64-BIT (IF-MIB HIGH CAPACITY)</option><option value="32">32-BIT (IF-MIB)</option></select></label>
+      </>}
+    </>}
+    <div className="form-section-title">VOICE ALERT MAPPING <span className="optional">AUDIO FOLDER: C:\CyberNOC\audio</span></div><AudioSelect label="DOWN ALERT" value={value.audio_down} files={files} allowNone={false} onChange={(next) => update('audio_down', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><AudioSelect label="RECOVERY ALERT" value={value.audio_recovered} files={files} allowNone={false} onChange={(next) => update('audio_recovered', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><AudioSelect label="REPEAT ALERT AUDIO" value={value.audio_reminder} files={files} allowNone onChange={(next) => update('audio_reminder', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><label>REPEAT EVERY (MINUTES)<span className="optional">DEFAULT 30 · RANGE 1–1440</span><input type="number" min="1" max="1440" step="1" value={value.alert_repeat_minutes} onChange={(event) => update('alert_repeat_minutes', Number(event.target.value))} required /></label>
     <button className="save-button"><Check size={15} /> {isNew ? 'ADD MONITOR' : 'SAVE CHANGES'}</button>{!isNew && <button type="button" className="remove-button" onClick={onRemove}>REMOVE MONITOR</button>}</form>;
 }
 
-function AudioSelect({ label, value, files, onChange, onTest }: { label: string; value: string | null; files: string[]; onChange: (value: string | null) => void; onTest: (file: string) => void }) { return <div className="audio-select"><label>{label}<select value={value || ''} onChange={(event) => onChange(event.target.value || null)}><option value="">NO AUDIO</option>{files.map((file) => <option value={file} key={file}>{file}</option>)}</select></label><button type="button" title="Test audio playback" disabled={!value} onClick={() => value && onTest(value)}><AudioLines size={14} /></button></div>; }
+function AudioSelect({ label, value, files, allowNone, onChange, onTest, onUpload }: { label: string; value: string | null; files: string[]; allowNone: boolean; onChange: (value: string | null) => void; onTest: (file: string) => void; onUpload: (file: File) => Promise<string> }) {
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  async function chooseAudio(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      onChange(await onUpload(file));
+    } catch {
+      // The parent displays the upload error in the dashboard notice.
+    } finally {
+      setUploading(false);
+      input.value = '';
+    }
+  }
+  return <div className="audio-select">
+    <label>{label}<select value={value || ''} onChange={(event) => onChange(event.target.value || null)}>{allowNone && <option value="">NO AUDIO</option>}{files.map((file) => <option value={file} key={file}>{file}</option>)}</select></label>
+    <input ref={fileInput} className="audio-file-input" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" onChange={(event) => void chooseAudio(event)} />
+    <button type="button" className="audio-upload-button" title="Browse and save an MP3/WAV file" aria-label={`Browse audio file for ${label}`} disabled={uploading} onClick={() => fileInput.current?.click()}><Upload size={14} /></button>
+    <button type="button" title="Test audio playback" aria-label={`Test ${label}`} disabled={!value} onClick={() => value && onTest(value)}><AudioLines size={14} /></button>
+  </div>;
+}

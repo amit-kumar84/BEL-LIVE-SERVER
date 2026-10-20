@@ -215,6 +215,106 @@ def parse_arp_entries(output: str) -> set[str]:
     return entries
 
 
+def normalize_mac_address(value: Any) -> str | None:
+    try:
+        octets = value.asOctets() if hasattr(value, "asOctets") else bytes(value)
+    except (TypeError, ValueError):
+        return None
+    if len(octets) != 6 or not any(octets) or octets[0] & 1:
+        return None
+    return ":".join(f"{octet:02x}" for octet in octets)
+
+
+def parse_bridge_fdb_mac(oid: str, base_oid: str, status: Any) -> str | None:
+    try:
+        if int(status) != 3:
+            return None
+    except (TypeError, ValueError):
+        return None
+    prefix = f"{base_oid}."
+    if not oid.startswith(prefix):
+        return None
+    try:
+        suffix = [int(part) for part in oid[len(prefix):].split(".")]
+        if len(suffix) < 6:
+            return None
+        octets = bytes(suffix[-6:])
+    except (ValueError, OverflowError):
+        return None
+    return normalize_mac_address(octets)
+
+
+async def _walk_snmp_table(engine: Any, auth: Any, target: Any, base_oid: str, timeout_seconds: float) -> list[tuple[str, Any]] | None:
+    from pysnmp.hlapi.v3arch.asyncio import ContextData, ObjectIdentity, ObjectType, walk_cmd
+
+    async def collect() -> list[tuple[str, Any]] | None:
+        rows: list[tuple[str, Any]] = []
+        async for error_indication, error_status, _, var_binds in walk_cmd(
+            engine, auth, target, ContextData(), ObjectType(ObjectIdentity(base_oid)),
+            lexicographicMode=False,
+        ):
+            if error_indication or error_status:
+                return None
+            for oid, value in var_binds:
+                oid_text = oid.prettyPrint()
+                if oid_text.startswith(f"{base_oid}."):
+                    rows.append((oid_text, value))
+                if len(rows) >= 4096:
+                    return rows
+        return rows or None
+
+    try:
+        return await asyncio.wait_for(collect(), timeout=timeout_seconds)
+    except (asyncio.TimeoutError, OSError, ValueError):
+        return None
+
+
+async def snmp_connected_clients(config: MonitorConfig) -> dict[str, Any] | None:
+    if not config.snmp.client_discovery_enabled or not config.snmp.host or not config.snmp.community:
+        return None
+    engine = None
+    try:
+        from pysnmp.hlapi.v3arch.asyncio import CommunityData, SnmpEngine, UdpTransportTarget
+
+        engine = SnmpEngine()
+        target = await UdpTransportTarget.create(
+            (config.snmp.host, config.snmp.port), timeout=config.timeout_ms / 1000, retries=0,
+        )
+        auth = CommunityData(config.snmp.community, mpModel=1)
+        timeout_seconds = max(5.0, config.timeout_ms / 1000 * 4)
+        table_oids = (
+            "1.3.6.1.2.1.4.22.1.2",  # IP-MIB ipNetToMediaPhysAddress
+            "1.3.6.1.2.1.4.35.1.4",  # IP-MIB ipNetToPhysicalPhysAddress
+            "1.3.6.1.2.1.17.4.3.1.3",  # BRIDGE-MIB dot1dTpFdbStatus
+            "1.3.6.1.2.1.17.7.1.2.2.1.3",  # Q-BRIDGE-MIB dot1qTpFdbStatus
+        )
+        tables = await asyncio.gather(*(
+            _walk_snmp_table(engine, auth, target, base_oid, timeout_seconds)
+            for base_oid in table_oids
+        ))
+        if all(rows is None for rows in tables):
+            return None
+        macs = {
+            mac for _, value in (tables[0] or []) + (tables[1] or [])
+            if (mac := normalize_mac_address(value)) is not None
+        }
+        for table_index in (2, 3):
+            base_oid = table_oids[table_index]
+            macs.update(
+                mac for oid, status in tables[table_index] or []
+                if (mac := parse_bridge_fdb_mac(oid, base_oid, status)) is not None
+            )
+        return {"count": len(macs), "source": "snmp", "endpoint": config.snmp.host}
+    except Exception:
+        return None
+    finally:
+        if engine is not None:
+            try:
+                engine.close_dispatcher()
+            except Exception:
+                pass
+
+
 def _local_network_for(endpoint: str, source_ip: str | None) -> ipaddress.IPv4Network | None:
     try:
         endpoint_ip = ipaddress.ip_address(endpoint)
@@ -404,11 +504,26 @@ class MonitorEngine:
                         rx_bps = bandwidth_delta(prior_rx, counters[0], now - prior_at, counter_bits)
                         tx_bps = bandwidth_delta(prior_tx, counters[1], now - prior_at, counter_bits)
                     self.bandwidth_previous[monitor.id] = (counters[0], counters[1], now, counter_source)
-                client_endpoint = monitor.gateway_ip
-                client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
-                if client_data["count"] is None:
-                    client_endpoint = monitor.target
+                if monitor.snmp.client_discovery_enabled:
+                    now = time.monotonic()
+                    last_scan = state.get("connected_clients_scan_at", 0.0)
+                    if now - last_scan >= 60 or "connected_clients" not in state:
+                        client_data = await snmp_connected_clients(monitor)
+                        if client_data is None:
+                            client_endpoint = monitor.gateway_ip
+                            client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
+                            if client_data["count"] is None:
+                                client_endpoint = monitor.target
+                                client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
+                        state["connected_clients"] = client_data
+                        state["connected_clients_scan_at"] = time.monotonic()
+                else:
+                    client_endpoint = monitor.gateway_ip
                     client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
+                    if client_data["count"] is None:
+                        client_endpoint = monitor.target
+                        client_data = await asyncio.to_thread(connected_clients, client_endpoint, monitor.source_ip)
+                    state["connected_clients"] = client_data
 
                 state, transition = update_state(state, raw_status, monitor)
                 checked_at = utc_now()
@@ -421,7 +536,6 @@ class MonitorEngine:
                     "gateway_latency_ms": gateway["latency_ms"], "latency_ms": target["latency_ms"],
                     "packet_loss_pct": loss, "rx_bps": rx_bps, "tx_bps": tx_bps,
                 }
-                state["connected_clients"] = client_data
                 self.store.save_sample(sample)
                 if transition:
                     event = {

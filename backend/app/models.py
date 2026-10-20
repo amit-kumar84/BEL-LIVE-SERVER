@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
+DEFAULT_DOWN_AUDIO = "down-default-alert.mp3"
+DEFAULT_RECOVERED_AUDIO = "restored-default-alert.mp3"
 
 
 def validate_host(value: str) -> str:
@@ -33,6 +35,7 @@ class SnmpConfig(BaseModel):
     community: str | None = Field(default=None, min_length=1, max_length=128)
     interface_index: int | None = Field(default=None, ge=1, le=2147483647)
     counter_bits: Literal[32, 64] = 64
+    client_discovery_enabled: bool = False
 
     @field_validator("host")
     @classmethod
@@ -43,6 +46,8 @@ class SnmpConfig(BaseModel):
     def enabled_config_is_complete(self) -> "SnmpConfig":
         if self.enabled and not all((self.host, self.community, self.interface_index)):
             raise ValueError("SNMP requires host, read-only community, and interface index")
+        if self.client_discovery_enabled and not all((self.host, self.community)):
+            raise ValueError("SNMP client discovery requires host and read-only community")
         return self
 
 
@@ -68,10 +73,22 @@ class MonitorConfig(BaseModel):
     tcp_port: int | None = Field(default=None, ge=1, le=65535)
     http_url: str | None = Field(default=None, max_length=2048)
     snmp: SnmpConfig = Field(default_factory=SnmpConfig)
-    audio_down: str | None = Field(default=None, max_length=255)
-    audio_recovered: str | None = Field(default=None, max_length=255)
+    audio_down: str | None = Field(default=DEFAULT_DOWN_AUDIO, max_length=255)
+    audio_recovered: str | None = Field(default=DEFAULT_RECOVERED_AUDIO, max_length=255)
     audio_reminder: str | None = Field(default=None, max_length=255)
     alert_repeat_minutes: int = Field(default=30, ge=1, le=1440)
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_status_audio(cls, values):
+        if not isinstance(values, dict):
+            return values
+        values = values.copy()
+        if not values.get("audio_down"):
+            values["audio_down"] = DEFAULT_DOWN_AUDIO
+        if not values.get("audio_recovered"):
+            values["audio_recovered"] = DEFAULT_RECOVERED_AUDIO
+        return values
 
     @field_validator("gateway_ip")
     @classmethod

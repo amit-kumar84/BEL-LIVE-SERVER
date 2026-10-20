@@ -7,7 +7,15 @@ export class AlertAudioQueue {
   private active = false;
   private announced = new Set<string>();
   private unlocked = false;
+  private playbackPreparation: (() => Promise<unknown> | unknown) | null = null;
   private listeners = new Set<(playback: AlertPlayback) => void>();
+
+  setPlaybackPreparation(preparation: () => Promise<unknown> | unknown) {
+    this.playbackPreparation = preparation;
+    return () => {
+      if (this.playbackPreparation === preparation) this.playbackPreparation = null;
+    };
+  }
 
   subscribe(listener: (playback: AlertPlayback) => void) {
     this.listeners.add(listener);
@@ -35,18 +43,21 @@ export class AlertAudioQueue {
     if (!this.unlocked || this.active || !this.queue.length) return;
     this.active = true;
     const alert = this.queue.shift()!;
+    this.notify({ ...alert, phase: 'started' });
     try {
+      try { await this.playbackPreparation?.(); } catch { }
       const audio = new Audio(`http://127.0.0.1:8000/api/audio/${encodeURIComponent(alert.filename)}`);
+      audio.volume = 1;
+      audio.muted = false;
       await audio.play();
-      this.notify({ ...alert, phase: 'started' });
       await new Promise<void>((resolve) => {
         audio.onended = () => resolve();
         audio.onerror = () => resolve();
       });
-      this.notify({ ...alert, phase: 'ended' });
     } catch {
       this.announced.delete(alert.eventId);
     } finally {
+      this.notify({ ...alert, phase: 'ended' });
       this.active = false;
       void this.playNext();
     }
@@ -54,6 +65,7 @@ export class AlertAudioQueue {
 
   async test(filename: string, token: string) {
     this.unlock();
+    try { await this.playbackPreparation?.(); } catch { }
     const response = await fetch('http://127.0.0.1:8000/api/admin/audio-test', {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ filename }),
@@ -61,6 +73,8 @@ export class AlertAudioQueue {
     if (!response.ok) throw new Error('Unable to load this audio file');
     const blob = await response.blob();
     const player = new Audio(URL.createObjectURL(blob));
+    player.volume = 1;
+    player.muted = false;
     await player.play();
   }
 }
