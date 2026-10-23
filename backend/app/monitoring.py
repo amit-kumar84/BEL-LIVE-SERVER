@@ -20,6 +20,7 @@ from .database import HistoryStore
 from .models import MonitorConfig
 
 DEFAULT_ALERT_REPEAT_MINUTES = 30
+PING_LATENCY_RE = re.compile(r"\btime(?P<under><)?\s*(?:=\s*)?(?P<value>\d+(?:\.\d+)?)\s*ms", re.IGNORECASE)
 ARP_ENTRY_RE = re.compile(
     r"^\s*(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+"
     r"(?P<mac>[0-9a-f]{2}(?:-[0-9a-f]{2}){5})\s+(?P<kind>\w+)\s*$",
@@ -85,12 +86,21 @@ def update_state(state: dict[str, Any], raw_status: str, config: MonitorConfig) 
     return state, None
 
 
+def parse_ping_latency(output: str) -> float | None:
+    match = PING_LATENCY_RE.search(output)
+    if not match:
+        return None
+    value = float(match.group("value"))
+    if match.group("under") and value == 1:
+        return 0.5
+    return value
+
+
 async def ping(host: str, timeout_ms: int, source_ip: str | None = None) -> dict[str, Any]:
     command = ["ping", "-n", "1", "-w", str(timeout_ms)]
     if source_ip:
         command += ["-S", source_ip]
     command.append(host)
-    started = time.perf_counter()
     process = None
     try:
         process = await asyncio.wait_for(
@@ -102,9 +112,8 @@ async def ping(host: str, timeout_ms: int, source_ip: str | None = None) -> dict
         )
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_ms / 1000 + 1.0)
         output = stdout.decode(errors="replace")
-        match = re.search(r"time(?:=|<)?\s*(?:<\s*)?(\d+(?:\.\d+)?)\s*ms", output, re.IGNORECASE)
         reachable = process.returncode == 0
-        latency = float(match.group(1)) if reachable and match else (round((time.perf_counter() - started) * 1000, 2) if reachable else None)
+        latency = parse_ping_latency(output) if reachable else None
         return {"reachable": reachable, "latency_ms": latency}
     except asyncio.CancelledError:
         if process and process.returncode is None:

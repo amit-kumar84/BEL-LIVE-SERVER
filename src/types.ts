@@ -31,6 +31,7 @@ export interface MonitorConfig {
 export interface Sample {
   checked_at: string;
   status: MonitorStatus;
+  gateway_latency_ms: number | null;
   latency_ms: number | null;
   packet_loss_pct: number | null;
   rx_bps: number | null;

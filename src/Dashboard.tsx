@@ -49,7 +49,7 @@ function elapsed(value: number) {
   return `${seconds}s`;
 }
 function rate(value: number | null) { if (value === null) return 'N/A'; if (value < 1_000) return `${value.toFixed(0)} bps`; if (value < 1_000_000) return `${(value / 1_000).toFixed(1)} Kbps`; return `${(value / 1_000_000).toFixed(1)} Mbps`; }
-function latency(value: number | null) { return value === null ? '---' : `${value.toFixed(1)} ms`; }
+function latency(value: number | null) { return value === null ? '---' : value < 1 ? '<1 ms' : `${value.toFixed(1)} ms`; }
 function bytesUsedTotal(used: number | null | undefined, total: number | null | undefined) {
   if (used == null || total == null) return 'N/A';
   const gib = 1024 ** 3;
@@ -130,14 +130,16 @@ export default function Dashboard() {
   const [loginLockedUntil, setLoginLockedUntil] = useState(0);
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [securityWarning, setSecurityWarning] = useState(false);
-  const [accessGrantedOverlay, setAccessGrantedOverlay] = useState(false);
-  const [accessGrantedStage, setAccessGrantedStage] = useState<'granted' | 'welcome'>('granted');
-  const [accessGrantedProgress, setAccessGrantedProgress] = useState(0);
+  const [accessOverlay, setAccessOverlay] = useState<{
+    mode: 'granted' | 'denied';
+    stage: 'verified' | 'granted' | 'welcome' | 'wrong-password' | 'denied';
+    progress: number;
+  } | null>(null);
   const [audioFiles, setAudioFiles] = useState<string[]>([]);
   const [editing, setEditing] = useState<MonitorConfig | null>(null);
   const [clock, setClock] = useState(new Date());
   const [notice, setNotice] = useState('');
-  const [audioAlert, setAudioAlert] = useState<{ kind: 'down' | 'recovered' | 'down-reminder'; monitorName: string } | null>(null);
+  const [audioAlert, setAudioAlert] = useState<{ kind: 'down' | 'recovered' | 'down-reminder'; monitorName: string; monitorType: string; source: 'audio' | 'silent' } | null>(null);
   const [showBootSequence, setShowBootSequence] = useState(true);
   const [bootStep, setBootStep] = useState(0);
   const [bootProgress, setBootProgress] = useState(0);
@@ -164,6 +166,7 @@ export default function Dashboard() {
     }
   });
   const seenEvents = useRef(new Set<number>());
+  const silentAlertTimerRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const bootAudioRef = useRef<HTMLAudioElement | null>(null);
   const applyDashboardData = (next: DashboardData) => {
@@ -176,6 +179,20 @@ export default function Dashboard() {
   const securityWarningAudioRef = useRef<HTMLAudioElement | null>(null);
   const monitorsRef = useRef(data.monitors);
   monitorsRef.current = data.monitors;
+  const showSilentAlert = (monitorId: string, kind: 'down' | 'recovered' | 'down-reminder') => {
+    const monitor = monitorsRef.current.find((entry) => entry.config.id === monitorId)?.config;
+    if (silentAlertTimerRef.current !== null) window.clearTimeout(silentAlertTimerRef.current);
+    setAudioAlert({
+      kind,
+      monitorName: monitor?.name || monitorId,
+      monitorType: monitor ? (monitor.custom_type || monitor.type.replace('_', ' ')).toUpperCase() : 'NETWORK DEVICE',
+      source: 'silent',
+    });
+    silentAlertTimerRef.current = window.setTimeout(() => {
+      setAudioAlert((current) => current?.source === 'silent' ? null : current);
+      silentAlertTimerRef.current = null;
+    }, 5000);
+  };
 
   useEffect(() => {
     const updateFullscreen = (fullscreen: boolean) => setFullScreen(fullscreen);
@@ -249,15 +266,25 @@ export default function Dashboard() {
     if (window.belCyberNoc) alertAudio.unlock();
   }, []);
 
-  useEffect(() => alertAudio.subscribe((playback) => {
-    if (playback.phase === 'started') {
-      const monitorName = monitorsRef.current.find((entry) => entry.config.id === playback.monitorId)?.config.name || playback.monitorId;
-      setAudioAlert({ kind: playback.kind as 'down' | 'recovered' | 'down-reminder', monitorName });
-      window.belCyberNoc?.focusWindow?.();
-    } else {
-      setAudioAlert(null);
-    }
-  }), []);
+  useEffect(() => {
+    const unsubscribe = alertAudio.subscribe((playback) => {
+      if (playback.phase === 'started') {
+        if (silentAlertTimerRef.current !== null) window.clearTimeout(silentAlertTimerRef.current);
+        silentAlertTimerRef.current = null;
+        const monitor = monitorsRef.current.find((entry) => entry.config.id === playback.monitorId)?.config;
+        const monitorName = monitor?.name || playback.monitorId;
+        const monitorType = monitor ? (monitor.custom_type || monitor.type.replace('_', ' ')).toUpperCase() : 'NETWORK DEVICE';
+        setAudioAlert({ kind: playback.kind as 'down' | 'recovered' | 'down-reminder', monitorName, monitorType, source: 'audio' });
+        window.belCyberNoc?.focusWindow?.();
+      } else {
+        setAudioAlert((current) => current?.source === 'audio' ? null : current);
+      }
+    });
+    return () => {
+      unsubscribe();
+      if (silentAlertTimerRef.current !== null) window.clearTimeout(silentAlertTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!audioAlert) return;
@@ -318,8 +345,11 @@ export default function Dashboard() {
           if (!seenEvents.current.has(item.id)) {
             seenEvents.current.add(item.id);
             const monitor = monitorsRef.current.find((entry) => entry.config.id === item.monitor_id)?.config;
-            const filename = item.kind === 'down' ? monitor?.audio_down : monitor?.audio_recovered;
-            if (filename) alertAudio.enqueue({ monitorId: item.monitor_id, filename, kind: item.kind, eventId: `event-${item.id}` });
+            if (item.kind === 'down' || item.kind === 'recovered') {
+              const filename = item.kind === 'down' ? monitor?.audio_down : monitor?.audio_recovered;
+              if (filename) alertAudio.enqueue({ monitorId: item.monitor_id, filename, kind: item.kind, eventId: `event-${item.id}` });
+              else showSilentAlert(item.monitor_id, item.kind);
+            }
           }
         }
         if (message.type === 'alert_reminder') {
@@ -332,7 +362,7 @@ export default function Dashboard() {
               kind: 'down-reminder',
               eventId: `down-reminder-${reminder.id}`,
             });
-          }
+          } else showSilentAlert(reminder.monitor_id, 'down-reminder');
         }
       };
       socket.onclose = () => { setBackend(false); reconnect = window.setTimeout(connect, 1800); };
@@ -349,6 +379,8 @@ export default function Dashboard() {
   }, [drawer, adminToken]);
 
   const activeCount = data.monitors.filter((item) => item.config.enabled).length;
+  const minimumColumns = data.monitors.length <= 3 ? data.monitors.length : Math.ceil(data.monitors.length / 2);
+  const monitorColumns = Math.min(4, data.monitors.length, Math.max(cardsPerRow, minimumColumns));
   const problemMonitors = data.monitors.filter((item) => item.config.enabled && ['down', 'gateway_down', 'upstream_down', 'application_down'].includes(item.status));
   const currentProblem = problemMonitors[0];
   const incidentEvents = useMemo(() => data.events
@@ -372,17 +404,18 @@ export default function Dashboard() {
       setFailedLoginAttempts(0);
       setLoginLockedUntil(0);
       setSecurityWarning(false);
-      setAccessGrantedStage('granted');
-      setAccessGrantedProgress(0);
-      setAccessGrantedOverlay(true);
+      setAccessOverlay({ mode: 'granted', stage: 'verified', progress: 0 });
       await playSecurityAudio(accessGrantedAudioRef, (progress) => {
-        setAccessGrantedProgress(progress);
-        if (progress >= 0.45) setAccessGrantedStage('welcome');
+        setAccessOverlay({
+          mode: 'granted',
+          stage: progress >= 0.55 ? 'welcome' : progress >= 0.2 ? 'granted' : 'verified',
+          progress,
+        });
       });
       setAdminToken(result.token);
       sessionStorage.setItem('cybernoc-admin', result.token);
       setDrawer(true);
-      setAccessGrantedOverlay(false);
+      setAccessOverlay(null);
     } catch (error) {
       const nextAttempts = failedLoginAttempts + 1;
       setFailedLoginAttempts(nextAttempts);
@@ -395,7 +428,11 @@ export default function Dashboard() {
         void playSecurityAudio(securityWarningAudioRef);
       } else {
         setLoginError('ACCESS DENIED — INCORRECT ADMIN PASSWORD');
-        void playSecurityAudio(accessDeniedAudioRef);
+        setAccessOverlay({ mode: 'denied', stage: 'wrong-password', progress: 0 });
+        await playSecurityAudio(accessDeniedAudioRef, (progress) => {
+          setAccessOverlay({ mode: 'denied', stage: progress >= 0.55 ? 'denied' : 'wrong-password', progress });
+        });
+        setAccessOverlay(null);
       }
     }
   }
@@ -457,6 +494,10 @@ export default function Dashboard() {
     try {
       const configs = data.monitors.map((item) => item.config);
       const currentIndex = configs.findIndex((item) => item.id === editing.id);
+      if (currentIndex === -1 && configs.length >= 8) {
+        setNotice('MAXIMUM OF 8 MONITORS ALLOWED');
+        return;
+      }
       if (currentIndex === -1) configs.push(editing);
       else configs[currentIndex] = editing;
       await api('/api/admin/monitors', { method: 'PUT', body: JSON.stringify({ monitors: configs }) }, adminToken);
@@ -526,18 +567,15 @@ export default function Dashboard() {
     if (!sim) {
       const monitor = data.monitors.find((item) => item.config.enabled);
       if (monitor?.config.audio_down) alertAudio.enqueue({ monitorId: monitor.config.id, filename: monitor.config.audio_down, kind: 'down', eventId: `simulation-${simulationCycle}-down` });
+      else if (monitor) showSilentAlert(monitor.config.id, 'down');
       setSim(true);
       return;
     }
     const monitor = data.monitors.find((item) => item.config.enabled);
     if (monitor?.config.audio_recovered) alertAudio.enqueue({ monitorId: monitor.config.id, filename: monitor.config.audio_recovered, kind: 'recovered', eventId: `simulation-${simulationCycle}-recovered` });
+    else if (monitor) showSilentAlert(monitor.config.id, 'recovered');
     setSim(false);
     setSimulationCycle((cycle) => cycle + 1);
-  }
-
-  function chooseCardsPerRow(value: number) {
-    setCardsPerRow(value);
-    window.localStorage.setItem('bel-cybernoc-columns', String(value));
   }
 
   function setNetworkIpMask(monitorId: string, masked: boolean) {
@@ -546,6 +584,11 @@ export default function Dashboard() {
       window.localStorage.setItem('bel-cybernoc-mask-network-lines', JSON.stringify(next));
       return next;
     });
+  }
+
+  function chooseCardsPerRow(value: number) {
+    setCardsPerRow(value);
+    window.localStorage.setItem('bel-cybernoc-columns', String(value));
   }
 
   function chooseDisplayTheme(value: DisplayTheme) {
@@ -591,24 +634,24 @@ export default function Dashboard() {
         <span className="backend-offline-hint">CHECK FASTAPI SERVICE / PORT 8000 / LOCAL NETWORK</span>
       </div>
     </div>}
-    {audioAlert && <div className={`audio-alert-overlay ${audioAlert.kind === 'recovered' ? 'restored' : 'warning'}`} role="status" aria-live="assertive">
-      <span className="audio-alert-kicker">{audioAlert.kind === 'recovered' ? '/// SYSTEM STATUS UPDATE' : '/// CRITICAL NETWORK ALERT'}</span>
-      <strong>{audioAlert.kind === 'recovered' ? 'SERVER RESTORED' : 'WARNING // SERVER DOWN'}</strong>
+    {audioAlert && <div className={`audio-alert-overlay ${audioAlert.kind === 'recovered' ? 'restored' : audioAlert.kind === 'down-reminder' ? 'reminder' : 'warning'}`} role="status" aria-live="assertive">
+      <span className="audio-alert-kicker">{audioAlert.kind === 'recovered' ? '/// SYSTEM STATUS UPDATE' : audioAlert.kind === 'down-reminder' ? '/// REPEATING INCIDENT ALERT' : '/// CRITICAL NETWORK ALERT'}</span>
+      <strong>{audioAlert.kind === 'recovered' ? `${audioAlert.monitorType} RESTORED` : audioAlert.kind === 'down-reminder' ? `WARNING // ${audioAlert.monitorType} STILL DOWN` : `WARNING // ${audioAlert.monitorType} DOWN`}</strong>
       <span className="audio-alert-target">{audioAlert.monitorName}</span>
-      <span className="audio-alert-signal">{audioAlert.kind === 'recovered' ? 'LINK STABLE · TELEMETRY RESUMED' : 'LINK FAILURE · INVESTIGATION REQUIRED'}</span>
+      <span className="audio-alert-signal">{audioAlert.kind === 'recovered' ? 'LINK STABLE · TELEMETRY RESUMED' : audioAlert.kind === 'down-reminder' ? 'INCIDENT REMAINS ACTIVE · INVESTIGATION REQUIRED' : 'LINK FAILURE · INVESTIGATION REQUIRED'}</span>
     </div>}
     <audio ref={accessGrantedAudioRef} src="/Access-Granted-Futuristic-Alert.mp3" preload="auto" />
     <audio ref={accessDeniedAudioRef} src="/Access-Denied-Futuristic-Alert.mp3" preload="auto" />
     <audio ref={securityWarningAudioRef} src="/SECURITY-WARNING-Futuristic-Alert.mp3" preload="auto" />
-    {accessGrantedOverlay && <div className="access-granted-overlay" role="status" aria-live="polite">
+    {accessOverlay && <div className={`access-granted-overlay ${accessOverlay.mode === 'denied' ? 'denied' : ''}`} role={accessOverlay.mode === 'denied' ? 'alert' : 'status'} aria-live={accessOverlay.mode === 'denied' ? 'assertive' : 'polite'}>
       <div className="access-granted-glow" />
       <div className="access-granted-core">
         <div className="access-granted-ring"><LockKeyhole size={68} /></div>
-        <span className="access-granted-kicker">{accessGrantedStage === 'granted' ? '/// AUTHORIZATION CONFIRMED ///' : '/// SECURE SESSION INITIALIZED ///'}</span>
-        <strong key={accessGrantedStage} className="access-granted-title">{accessGrantedStage === 'granted' ? 'ACCESS GRANTED' : 'WELCOME ADMINISTRATOR'}</strong>
-        <span className="access-granted-message">{accessGrantedStage === 'granted' ? 'VERIFYING SECURE CREDENTIALS' : 'CONFIGURATION MATRIX UNLOCKED'}</span>
-        <div className="access-granted-progress" role="progressbar" aria-label="Access confirmation audio" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(accessGrantedProgress * 100)}>
-          <span style={{ transform: `scaleX(${accessGrantedProgress})` }} />
+        <span className="access-granted-kicker">{accessOverlay.mode === 'denied' ? accessOverlay.stage === 'wrong-password' ? '/// CREDENTIALS REJECTED ///' : '/// AUTHORIZATION DENIED ///' : accessOverlay.stage === 'verified' ? '/// CREDENTIALS VERIFIED ///' : accessOverlay.stage === 'granted' ? '/// AUTHORIZATION CONFIRMED ///' : '/// SECURE SESSION INITIALIZED ///'}</span>
+        <strong key={accessOverlay.stage} className="access-granted-title">{accessOverlay.stage === 'wrong-password' ? 'WRONG PASSWORD' : accessOverlay.stage === 'denied' ? 'ACCESS DENIED' : accessOverlay.stage === 'verified' ? 'PASSWORD VERIFIED' : accessOverlay.stage === 'granted' ? 'ACCESS GRANTED' : 'WELCOME ADMINISTRATOR'}</strong>
+        <span className="access-granted-message">{accessOverlay.mode === 'denied' ? accessOverlay.stage === 'wrong-password' ? 'PASSWORD COULD NOT BE VERIFIED' : 'CHECK YOUR CREDENTIALS AND TRY AGAIN' : accessOverlay.stage === 'verified' ? 'SECURE SESSION CHECK IN PROGRESS' : accessOverlay.stage === 'granted' ? 'INITIALIZING ADMINISTRATOR ACCESS' : 'CONFIGURATION MATRIX UNLOCKED'}</span>
+        <div className="access-granted-progress" role="progressbar" aria-label={accessOverlay.mode === 'denied' ? 'Access denied audio' : 'Access confirmation audio'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(accessOverlay.progress * 100)}>
+          <span style={{ transform: `scaleX(${accessOverlay.progress})` }} />
         </div>
       </div>
     </div>}
@@ -640,7 +683,7 @@ export default function Dashboard() {
 
     <section className="section-heading"><div><span className="section-index">01</span><h1>LINE STATUS</h1><span className="section-caption">LIVE REACHABILITY <i>·</i> ROUTE-AWARE PROBES</span></div><div className="section-tools"><span className="refresh-mark"><span /> PROBE WINDOW 20 S</span></div></section>
 
-    {data.monitors.length === 0 ? <div className="empty-state"><Router size={29} /><strong>NO MONITORS CONFIGURED</strong><span>Open monitor configuration to add your first network line.</span><button onClick={() => setDrawer(true)}>OPEN CONFIGURATION <ChevronRight size={14} /></button></div> : <section className="monitor-grid" data-columns={cardsPerRow}>{data.monitors.map((monitor, index) => <MonitorCard key={monitor.config.id} monitor={monitor} index={index} simulated={sim} maskNetworkIps={maskedNetworkLines[monitor.config.id] === true} onEdit={() => { setEditing(monitor.config); setDrawer(true); }} />)}</section>}
+    {data.monitors.length === 0 ? <div className="empty-state"><Router size={29} /><strong>NO MONITORS CONFIGURED</strong><span>Open monitor configuration to add your first network line.</span><button onClick={() => setDrawer(true)}>OPEN CONFIGURATION <ChevronRight size={14} /></button></div> : <section className="monitor-grid" data-columns={monitorColumns}>{data.monitors.map((monitor, index) => <MonitorCard key={monitor.config.id} monitor={monitor} index={index} simulated={sim} maskNetworkIps={maskedNetworkLines[monitor.config.id] === true} onEdit={() => { setEditing(monitor.config); setDrawer(true); }} />)}</section>}
 
     <section className="lower-grid"><div className="panel events-panel"><PanelTitle index="02" title="INCIDENT TIMELINE" right={<span className="micro-live"><span /> LAST OUTAGES</span>} />{incidentEvents.length ? <div className="event-list"><div className="event-header"><span /> <span>MONITOR / LINE</span><span>STATE</span><span>DATE</span><span>DOWN TIME</span><span>UP TIME</span><span>DURATION</span></div>{incidentEvents.map((event) => {
       const currentDown = data.monitors.some((item) => item.config.id === event.monitor_id && item.config.enabled && ['down', 'gateway_down', 'upstream_down', 'application_down'].includes(item.status));
@@ -680,10 +723,11 @@ export default function Dashboard() {
             <div className="form-section-title">WALL DISPLAY</div>
             <div className="display-setting-row">
               <span>MONITORS PER ROW</span>
-              <div className="display-segmented" role="group" aria-label="Monitors per row">
+              <div className="display-segmented" role="group" aria-label="Preferred monitors per row">
                 {[2, 3, 4].map((count) => <button key={count} type="button" className={cardsPerRow === count ? 'selected' : ''} aria-pressed={cardsPerRow === count} onClick={() => chooseCardsPerRow(count)}>{count}</button>)}
               </div>
             </div>
+            <div className="form-hint">MAX 8 LINES · COLUMNS ADJUST TO KEEP THE DISPLAY WITHIN 2 ROWS</div>
             <div className="display-setting-row">
               <span>VISUAL THEME</span>
               <div className="display-segmented theme-segmented" role="group" aria-label="Visual theme">
@@ -696,8 +740,8 @@ export default function Dashboard() {
             <div className="export-settings"><div className="form-section-title">INCIDENT LOG EXPORT <span className="optional">IST · 12-HOUR FORMAT</span></div><div className="export-dates"><label>FROM<input type="date" value={exportDates.start} onChange={(event) => setExportDates((current) => ({ ...current, start: event.target.value }))} /></label><label>TO<input type="date" value={exportDates.end} onChange={(event) => setExportDates((current) => ({ ...current, end: event.target.value }))} /></label></div><button type="button" className="add-monitor export-button" onClick={() => void exportIncidents()}><Download size={14} /> EXPORT EXCEL CSV</button></div>
           </div>
           <div className="drawer-toolbar">
-            <span>{data.monitors.length} CONFIGURED LINES</span>
-            <button onClick={() => setEditing(createMonitor())}><Plus size={14} /> NEW MONITOR</button>
+            <span>{data.monitors.length} / 8 CONFIGURED LINES</span>
+            <button disabled={data.monitors.length >= 8} title={data.monitors.length >= 8 ? 'Maximum of 8 monitors reached' : 'Add monitor'} onClick={() => setEditing(createMonitor())}><Plus size={14} /> NEW MONITOR</button>
           </div>
           <div className="monitor-list">
             {data.monitors.map((item, index) => <div className={`monitor-list-row ${editing?.id === item.config.id ? 'active' : ''}`} key={item.config.id}>
@@ -771,7 +815,7 @@ function AboutCard() {
       <div className="about-meta-grid">
         <div className="about-meta">
           <span>Developer</span>
-          <strong>Amit Kumar</strong>
+          <strong>Amit Kumar </strong>
         </div>
         <div className="about-meta">
           <span>GitHub</span>
@@ -817,18 +861,37 @@ function MonitorCard({ monitor, index, simulated, maskNetworkIps, onEdit }: { mo
     <div className="card-accent" />    <div className="card-head"><div className="card-name"><span className="line-number">LN-{String(index + 1).padStart(2, '0')}</span><div className="card-title-group"><div className="card-title-row"><h2>{config.name}</h2>{config.active_nodes_visible && <div className={`card-client-count ${monitor.status}`} title={`${clientSourceLabel} active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`} aria-label={`${clientSourceLabel} active nodes: ${monitor.connected_clients.count ?? 'unavailable'}`}><i className="active-node-pulse" /><Monitor size={15} /><strong>{monitor.connected_clients.count ?? '--'}</strong></div>}</div><span className="card-type">{(config.custom_type || config.type.replace('_', ' ')).toUpperCase()}</span></div></div><div className={`state-badge ${stateClass}`}><span />{statusLabels[stateClass] || stateClass.toUpperCase()}</div><button className="card-settings" onClick={onEdit} title="Edit monitor"><Settings2 size={16} /></button></div>
     <div className="endpoint-row"><div><span>GATEWAY <Signal className={`network-icon ${endpointState(monitor.gateway_reachable)}`} size={13} /></span><strong>{maskEndpoint(config.gateway_ip, maskNetworkIps) || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.gateway_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.gateway_reachable)}</small></div><div className="endpoint-link"><span /></div><div><span>REMOTE TARGET <Signal className={`network-icon ${endpointState(monitor.target_reachable)}`} size={13} /></span><strong>{maskEndpoint(config.target, maskNetworkIps) || 'NOT CONFIGURED'}</strong><small className={endpointState(monitor.target_reachable) === 'signal-down' ? 'bad-text' : ''}>{endpointLabel(monitor.target_reachable)}</small></div></div>
     <div className="card-metrics"><div className={metricTone(monitor.latency_ms, config.latency_warning_ms)}><span><Signal size={13} /> RTT</span><strong>{simulated && index === 0 ? '---' : latency(monitor.latency_ms)}</strong></div><div className={lossTone(displayLoss)}><span>{lineDown ? <WifiOff className="line-down-icon" size={13} /> : <Wifi size={13} />} LOSS</span><strong>{simulated && index === 0 ? '---' : displayLoss === null ? '---' : `${displayLoss.toFixed(1)}%`}</strong></div><div className={uptimeTone(displayUptime)}><span><Clock3 size={13} /> DAILY UPTIME</span><strong>{displayUptime === null ? '---' : `${displayUptime.toFixed(1)}%`}</strong></div></div>
-    <div className="history-chart"><div className="chart-title"><span>LATENCY / HISTORY</span><span>{monitor.last_check ? stamp(monitor.last_check) : 'AWAITING DATA'}</span></div><MiniChart samples={history} status={previewStatus} /></div>
+    <div className="history-chart"><div className="chart-title"><span>RTT <i className="chart-key gateway" />GW <i className="chart-key target" />TARGET</span><span>{monitor.last_check ? stamp(monitor.last_check) : 'AWAITING DATA'}</span></div><MiniChart samples={history} status={previewStatus} /></div>
     <div className="throughput"><div><span><i className="rx-arrow">↓</i> RX / IN</span><strong>{rate(monitor.rx_bps)}</strong></div><div><span><i className="tx-arrow">↑</i> TX / OUT</span><strong>{rate(monitor.tx_bps)}</strong></div><div className="route-note"><Router size={13} /><span>{monitor.route_strategy === 'source-address' ? `SRC ${config.source_ip}` : 'WINDOWS DEFAULT ROUTE'}</span></div></div>
     {simulated && index < 2 && <div className="sim-card-tag">SIMULATED PREVIEW</div>}
   </article>;
 }
 
 function MiniChart({ samples, status }: { samples: Sample[]; status: string }) {
-  const valid = samples.filter((item) => item.latency_ms !== null).map((item) => item.latency_ms as number);
+  const valid = samples.flatMap((item) => [item.gateway_latency_ms, item.latency_ms]).filter((value): value is number => value !== null);
   if (!valid.length) return <div className="chart-empty"><span />NO HISTORICAL MEASUREMENTS</div>;
-  const max = Math.max(20, ...valid) * 1.15;
-  const points = valid.map((value, index) => `${index / Math.max(1, valid.length - 1) * 100},${28 - value / max * 24}`).join(' ');
-  return <svg viewBox="0 0 100 30" preserveAspectRatio="none" className={`chart-svg ${status}`} aria-label="Historical latency chart"><line x1="0" x2="100" y1="26" y2="26" className="chart-axis" /><polyline points={`0,28 ${points} 100,28`} className="chart-area" /><polyline points={points} className="chart-line" /></svg>;
+  const minimum = Math.min(...valid);
+  const maximum = Math.max(...valid);
+  const padding = Math.max((maximum - minimum) * 0.2, maximum * 0.08, 0.1);
+  const lowerBound = Math.max(0, minimum - padding);
+  const upperBound = maximum + padding;
+  const range = Math.max(upperBound - lowerBound, 0.2);
+  const pathFor = (readLatency: (item: Sample) => number | null) => {
+    const commands: string[] = [];
+    let connected = false;
+    samples.forEach((item, index) => {
+      const value = readLatency(item);
+      if (value === null) { connected = false; return; }
+      const x = index / Math.max(1, samples.length - 1) * 100;
+      const y = 25 - (value - lowerBound) / range * 22;
+      commands.push(`${connected ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`);
+      connected = true;
+    });
+    return commands.join(' ');
+  };
+  const gatewayPath = pathFor((item) => item.gateway_latency_ms);
+  const targetPath = pathFor((item) => item.latency_ms);
+  return <svg viewBox="0 0 100 30" preserveAspectRatio="none" className={`chart-svg ${status}`} aria-label="Gateway and target RTT history"><line x1="0" x2="100" y1="26" y2="26" className="chart-axis" />{gatewayPath && <path d={gatewayPath} className="chart-gateway-line" />}{targetPath && <path d={targetPath} className="chart-target-line" />}</svg>;
 }
 
 function MonitorForm({ value, files, maskNetworkIps, onMaskNetworkIpsChange, onChange, onSubmit, onRemove, isNew, onTestAudio, onUploadAudio }: { value: MonitorConfig; files: string[]; maskNetworkIps: boolean; onMaskNetworkIpsChange: (masked: boolean) => void; onChange: (value: MonitorConfig) => void; onSubmit: (event: React.FormEvent) => void; onRemove: () => void; isNew: boolean; onTestAudio: (file: string) => void; onUploadAudio: (file: File) => Promise<string> }) {
@@ -880,7 +943,7 @@ function MonitorForm({ value, files, maskNetworkIps, onMaskNetworkIpsChange, onC
         <label>COUNTER WIDTH<select value={value.snmp.counter_bits} onChange={(event) => updateSnmp('counter_bits', Number(event.target.value) as 32 | 64)}><option value="64">64-BIT (IF-MIB HIGH CAPACITY)</option><option value="32">32-BIT (IF-MIB)</option></select></label>
       </>}
     </>}
-    <div className="form-section-title">VOICE ALERT MAPPING <span className="optional">AUDIO FOLDER: C:\CyberNOC\audio</span></div><AudioSelect label="DOWN ALERT" value={value.audio_down} files={files} allowNone={false} onChange={(next) => update('audio_down', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><AudioSelect label="RECOVERY ALERT" value={value.audio_recovered} files={files} allowNone={false} onChange={(next) => update('audio_recovered', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><AudioSelect label="REPEAT ALERT AUDIO" value={value.audio_reminder} files={files} allowNone onChange={(next) => update('audio_reminder', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><label>REPEAT EVERY (MINUTES)<span className="optional">DEFAULT 30 · RANGE 1–1440</span><input type="number" min="1" max="1440" step="1" value={value.alert_repeat_minutes} onChange={(event) => update('alert_repeat_minutes', Number(event.target.value))} required /></label>
+    <div className="form-section-title">VOICE ALERT MAPPING <span className="optional">AUDIO FOLDER: C:\CyberNOC\audio</span></div><AudioSelect label="DOWN ALERT" value={value.audio_down} files={files} allowNone onChange={(next) => update('audio_down', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><AudioSelect label="RECOVERY ALERT" value={value.audio_recovered} files={files} allowNone onChange={(next) => update('audio_recovered', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><AudioSelect label="REPEAT ALERT AUDIO" value={value.audio_reminder} files={files} allowNone onChange={(next) => update('audio_reminder', next)} onTest={onTestAudio} onUpload={onUploadAudio} /><label>REPEAT EVERY (MINUTES)<span className="optional">DEFAULT 30 · RANGE 1–1440</span><input type="number" min="1" max="1440" step="1" value={value.alert_repeat_minutes} onChange={(event) => update('alert_repeat_minutes', Number(event.target.value))} required /></label>
     <button className="save-button"><Check size={15} /> {isNew ? 'ADD MONITOR' : 'SAVE CHANGES'}</button>{!isNew && <button type="button" className="remove-button" onClick={onRemove}>REMOVE MONITOR</button>}</form>;
 }
 

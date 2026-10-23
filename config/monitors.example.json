@@ -17,8 +17,8 @@
       "tcp_port": 443,
       "http_url": null,
       "snmp": { "enabled": false, "host": null, "port": 161, "community": null, "interface_index": null, "counter_bits": 64 },
-      "audio_down": null,
-      "audio_recovered": null
+      "audio_down": "down-default-alert.mp3",
+      "audio_recovered": "restored-default-alert.mp3"
     },
     {
       "id": "sap-secondary",
@@ -37,8 +37,8 @@
       "tcp_port": 443,
       "http_url": null,
       "snmp": { "enabled": false, "host": null, "port": 161, "community": null, "interface_index": null, "counter_bits": 64 },
-      "audio_down": null,
-      "audio_recovered": null
+      "audio_down": "down-default-alert.mp3",
+      "audio_recovered": "restored-default-alert.mp3"
     },
     {
       "id": "internet-primary",
@@ -57,8 +57,8 @@
       "tcp_port": 443,
       "http_url": null,
       "snmp": { "enabled": false, "host": null, "port": 161, "community": null, "interface_index": null, "counter_bits": 64 },
-      "audio_down": null,
-      "audio_recovered": null
+      "audio_down": "down-default-alert.mp3",
+      "audio_recovered": "restored-default-alert.mp3"
     },
     {
       "id": "internet-secondary",
@@ -77,8 +77,8 @@
       "tcp_port": 443,
       "http_url": null,
       "snmp": { "enabled": false, "host": null, "port": 161, "community": null, "interface_index": null, "counter_bits": 64 },
-      "audio_down": null,
-      "audio_recovered": null
+      "audio_down": "down-default-alert.mp3",
+      "audio_recovered": "restored-default-alert.mp3"
     }
   ]
 }

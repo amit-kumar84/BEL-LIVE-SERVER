@@ -5,8 +5,8 @@ import pytest
 
 from app.audio import safe_audio_file
 from app.database import HistoryStore
-from app.models import MonitorConfig
-from app.monitoring import bandwidth_delta, down_alert_due, normalize_mac_address, parse_arp_entries, parse_bridge_fdb_mac, should_emit_down_reminder, snmp_connected_clients, update_state
+from app.models import MonitorConfig, MonitorList
+from app.monitoring import bandwidth_delta, down_alert_due, normalize_mac_address, parse_arp_entries, parse_bridge_fdb_mac, parse_ping_latency, should_emit_down_reminder, snmp_connected_clients, update_state
 
 
 def config(**overrides):
@@ -26,6 +26,13 @@ def test_config_rejects_invalid_host_and_interval():
         config(gateway_ip="gateway.local")
     with pytest.raises(ValueError):
         config(interval_seconds=1)
+
+
+def test_monitor_list_allows_eight_and_rejects_nine():
+    monitors = [config(id=f"line-{index}") for index in range(8)]
+    assert len(MonitorList(monitors=monitors).monitors) == 8
+    with pytest.raises(ValueError):
+        MonitorList(monitors=monitors + [config(id="line-extra")])
 
 
 def test_repeat_interval_is_configurable_and_validated():
@@ -61,12 +68,12 @@ def test_reminder_audio_uses_validated_audio_filename():
         config(audio_reminder="repeat.ogg")
 
 
-def test_down_and_recovery_audio_default_when_missing_or_unset():
+def test_down_and_recovery_audio_default_when_missing_and_allow_none_when_explicit():
     assert config().audio_down == "down-default-alert.mp3"
     assert config().audio_recovered == "restored-default-alert.mp3"
     configured = config(audio_down=None, audio_recovered=None)
-    assert configured.audio_down == "down-default-alert.mp3"
-    assert configured.audio_recovered == "restored-default-alert.mp3"
+    assert configured.audio_down is None
+    assert configured.audio_recovered is None
 
 
 def test_failure_and_recovery_threshold_transitions():
@@ -104,6 +111,12 @@ def test_bandwidth_handles_counter_wrap_and_reset():
     assert bandwidth_delta((1 << 32) - 20, 10, 1, 32) == 240
     assert bandwidth_delta(9000, 20, 1, 32) is None
     assert bandwidth_delta(20, 30, 0, 32) is None
+
+
+def test_ping_latency_preserves_windows_under_one_millisecond_reading():
+    assert parse_ping_latency("Reply from 192.0.2.1: time<1ms TTL=128") == 0.5
+    assert parse_ping_latency("Reply from 192.0.2.1: time=14ms TTL=128") == 14
+    assert parse_ping_latency("Reply from 192.0.2.1: TTL=128") is None
 
 
 def test_parse_arp_entries_returns_only_valid_ipv4_rows():

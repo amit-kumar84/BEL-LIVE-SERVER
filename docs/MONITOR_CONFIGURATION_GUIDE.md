@@ -115,8 +115,8 @@ Interpret this as an **observed estimate**, not a guaranteed total of every devi
 
 | Field | What to select | What happens |
 | --- | --- | --- |
-| **Down alert** | MP3 or WAV file. A default is supplied. | Played when the monitor crosses its down threshold. |
-| **Recovery alert** | MP3 or WAV file. A default is supplied. | Played when the monitor meets its recovery threshold. |
+| **Down alert** | MP3/WAV file, or `NO AUDIO`. A default is selected on new monitors. | Played when the monitor crosses its down threshold, unless set to `NO AUDIO`. |
+| **Recovery alert** | MP3/WAV file, or `NO AUDIO`. A default is selected on new monitors. | Played when the monitor meets its recovery threshold, unless set to `NO AUDIO`. |
 | **Repeat alert audio** | Optional MP3/WAV file, or `NO AUDIO`. | Played for reminders while a down incident remains open. |
 | **Repeat every (minutes)** | 1-1,440; default 30. | Sets the reminder cadence. A reminder sound requires a repeat audio file to be selected. |
 

@@ -4,8 +4,10 @@ import wave
 
 from fastapi.testclient import TestClient
 
+from app import config as config_module
 from app import main as main_module
 from app.main import app
+from app.models import MonitorConfig
 
 
 def wav_bytes(duration_seconds: int) -> bytes:
@@ -35,6 +37,24 @@ def test_monitor_save_reconfigures_engine_and_returns_applied_snapshot():
         assert response.status_code == 200
         assert response.json()["monitors"] == []
         assert client.get("/api/dashboard").json()["monitors"] == []
+
+
+def test_no_audio_mapping_persists_after_configuration_reload(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "monitors.json")
+    monitor = MonitorConfig(
+        id="silent-line", name="Silent line", type="internet",
+        gateway_ip="192.168.1.1", target="1.1.1.1",
+        audio_down=None, audio_recovered=None, audio_reminder=None,
+    )
+
+    config_module.save_monitors([monitor])
+    loaded = config_module.load_monitors()
+
+    assert len(loaded) == 1
+    assert loaded[0].audio_down is None
+    assert loaded[0].audio_recovered is None
+    assert loaded[0].audio_reminder is None
 
 
 def test_admin_session_validation_and_logout():

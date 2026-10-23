@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .models import MonitorConfig
+from .models import MonitorConfig, MonitorList
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,7 +39,7 @@ def load_monitors() -> list[MonitorConfig]:
         else:
             CONFIG_PATH.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
     payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    monitors = [MonitorConfig.model_validate(item) for item in payload.get("monitors", [])]
+    monitors = MonitorList.model_validate({"monitors": payload.get("monitors", [])}).monitors
     ids = [monitor.id for monitor in monitors]
     if len(ids) != len(set(ids)):
         raise ValueError("Monitor IDs must be unique")

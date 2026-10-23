@@ -84,9 +84,9 @@ class MonitorConfig(BaseModel):
         if not isinstance(values, dict):
             return values
         values = values.copy()
-        if not values.get("audio_down"):
+        if "audio_down" not in values:
             values["audio_down"] = DEFAULT_DOWN_AUDIO
-        if not values.get("audio_recovered"):
+        if "audio_recovered" not in values:
             values["audio_recovered"] = DEFAULT_RECOVERED_AUDIO
         return values
 
@@ -131,7 +131,7 @@ class MonitorConfig(BaseModel):
 
 
 class MonitorList(BaseModel):
-    monitors: list[MonitorConfig]
+    monitors: list[MonitorConfig] = Field(max_length=8)
 
 
 class AdminLogin(BaseModel):
